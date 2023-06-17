@@ -4,10 +4,16 @@ use std::collections::BTreeMap;
 use std::io::prelude::*;
 use std::{io::BufReader, path::PathBuf};
 
+use std::fs::File;
+use gbam_tools::reader::parse_tmplt::ParsingTemplate;
+use gbam_tools::reader::reader::Reader;
+use gbam_tools::reader::records::Records;
+
 #[derive(Debug)]
 struct Args {
     gfa: PathBuf,
     alignments: Option<PathBuf>,
+    alignments_gbam: Option<PathBuf>,
 
     path_range: Option<(String, usize, usize)>,
 }
@@ -217,7 +223,7 @@ impl PathIndex {
 
 fn main() -> Result<()> {
     let Ok(args) = parse_args() else {
-        println!("USAGE: `gfainject --gfa <gfa-path> --bam <bam-path>`");
+        println!("USAGE: `gfainject --gfa <gfa-path> --bam <bam-path>` or `gfainject --gfa <gfa-path> --gbam <gbam-path>`");
         return Ok(());
     };
 
@@ -225,6 +231,8 @@ fn main() -> Result<()> {
 
     if let Some(bam_path) = args.alignments {
         return main_cmd(path_index, bam_path);
+    } else if let Some(gbam_path) = args.alignments_gbam {
+        return main_cmd_gbam(path_index, gbam_path);
     } else if let Some((path, start, end)) = args.path_range {
         return path_range_cmd(path_index, path, start, end);
     }
@@ -499,6 +507,239 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
+    let file = File::open(gbam_path.clone()).unwrap();
+    let mut template = ParsingTemplate::new();
+    template.set_all();
+    let mut reader = Reader::new(file, template).unwrap();
+
+    //let ref_seqs = reader.file_meta.get_ref_seqs();
+
+    let mut records_it = Records::new(&mut reader);
+    while let Some(rec) = records_it.next_rec() {
+        println!("rec.bin.unwrap(): {}", rec.bin.unwrap());
+        println!("rec.refid.unwrap(): {}", rec.refid.unwrap());
+        println!("rec.mapq.unwrap(): {}", rec.mapq.unwrap());
+        println!("rec.pos.unwrap(): {}", rec.pos.unwrap() as i64);
+        println!("rec.flag.unwrap(): {}", rec.flag.unwrap());
+        println!("rec.next_ref_id.unwrap(): {}", rec.next_ref_id.unwrap());
+        println!("rec.next_pos.unwrap(): {}", rec.next_ref_id.unwrap() as i64);
+        println!("rec.tlen.unwrap(): {}", rec.tlen.unwrap() as i64);
+        println!("rec.read_name.unwrap(): {:?}", String::from_utf8(rec.read_name.as_ref().unwrap()[..rec.read_name.as_ref().unwrap().len() - 1].to_owned()));
+        println!("\n\n");
+
+        let rec_seq_len = rec.seq.as_ref().unwrap().len();
+        let mut qual = rec.qual.as_ref().unwrap().clone();
+        if qual.is_empty() {
+            qual = vec![255; rec_seq_len];
+        }
+    }
+
+
+    use noodles::bam;
+
+    let Ok(args) = parse_args() else {
+        println!("USAGE: `gfa-injection --gfa <gfa-path> --bam <gbam-path>`");
+        return Ok(());
+    };
+
+    let mut bam = std::fs::File::open(&gbam_path).map(bam::Reader::new)?;
+
+    let header = {
+        use noodles::sam;
+        // the noodles parse() impl demands that the @HD lines go first,
+        // but that's clearly not a guarantee i can enforce
+        let raw = bam.read_header()?;
+        let mut header = sam::Header::builder();
+
+        for line in raw.lines() {
+            use noodles::sam::header::Record as HRecord;
+            if let Ok(record) = line.parse::<HRecord>() {
+                header = match record {
+                    HRecord::Header(hd) => header.set_header(hd),
+                    HRecord::ReferenceSequence(sq) => {
+                        header.add_reference_sequence(sq)
+                    }
+                    HRecord::ReadGroup(rg) => header.add_read_group(rg),
+                    HRecord::Program(pg) => header.add_program(pg),
+                    HRecord::Comment(co) => header.add_comment(co),
+                };
+            }
+        }
+
+        header.build()
+    };
+
+    let ref_seqs = bam.read_reference_sequences()?;
+
+    // for (key, val) in ref_seqs {
+    //     let len = val.length();
+    //     eprintln!("{key}\t{len}");
+    // }
+
+
+    let mut stdout = std::io::stdout().lock();
+
+    for rec in bam.records() {
+        let record = rec?;
+
+        // if record.flags().is_reverse_complemented() {
+        //     continue;
+        // }
+
+        let Some(read_name) = record.read_name() else {
+            continue;
+        };
+
+        // let name = read_name.to_string();
+        // dbg!(&name);
+        // let name = std::str::from_utf8(read_name.to_)?;
+
+        // convenient for debugging
+        // let name: &str = read_name.as_ref();
+        // if name != "A00404:156:HV37TDSXX:4:1213:6370:23359" {
+        //     continue;
+        // }
+
+        let Some(ref_name) = record
+            .reference_sequence(&header)
+            .and_then(|s| s.ok().map(|s| s.name()))
+            else {
+                continue;
+            };
+
+        let Some(path_id) = path_index.path_names.get(ref_name.as_str()).copied() else {
+            continue;
+        };
+
+        // skip the record if there is no alignment information
+        if record.alignment_start().is_none() || record.alignment_end().is_none() {
+            continue;
+        }
+
+        let start = record.alignment_start().unwrap();
+        let end = record.alignment_end().unwrap();
+        let al_len = record.alignment_span();
+        //assert!(end - start == al_len);
+
+        let start_pos = (start.get()-1) as u32;
+        let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
+        //eprintln!("start_rank = {}", start_rank);
+        let mut step_offset = start_pos
+            - path_index.path_step_offsets[path_id]
+            .select((start_rank - 1) as u32)
+            .unwrap();
+
+        let pos_range = ((start.get()-1) as u32)..((end.get()-1) as u32);
+        if let Some(steps) =
+            path_index.path_step_range_iter(ref_name.as_str(), pos_range)
+        {
+            let mut path_str = String::new();
+
+            let mut steps = steps.collect::<Vec<_>>();
+
+            if record.flags().is_reverse_complemented() {
+                steps.reverse();
+            }
+
+            let mut path_len: usize = 0;
+
+            for (_step_ix, step) in steps {
+                // path length is given by the length of nodes in the graph
+                path_len += path_index.segment_lens[(step.node) as usize];
+                use std::fmt::Write;
+                // eprintln!("step_ix: {step_ix}");
+
+                // let reverse = step.reverse;
+                let forward = step.reverse ^ record.flags().is_reverse_complemented();
+                if forward {
+                    write!(&mut path_str, ">")?;
+                } else {
+                    write!(&mut path_str, "<")?;
+                }
+                write!(
+                    &mut path_str,
+                    "{}",
+                    step.node + path_index.segment_id_range.0 as u32
+                )?;
+            }
+
+            if record.flags().is_reverse_complemented() {
+                // start node offset changes
+                //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
+                let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
+                step_offset = last_bit;
+            }
+
+            // query name
+            write!(stdout, "{}\t", read_name)?;
+
+            // query len
+            let query_len = record.cigar().read_length();
+            write!(stdout, "{query_len}\t")?;
+
+            // query start (0-based, closed)
+            let query_start = 0;
+            write!(stdout, "{query_start}\t")?;
+
+            // query end (0-based, open)
+            write!(stdout, "{}\t", query_start + query_len)?;
+
+            // strand
+            // if record.flags().is_reverse_complemented() {
+            // print!("-\t");
+            // } else {
+            write!(stdout, "+\t")?;
+            // }
+
+            // path
+            write!(stdout, "{path_str}\t")?;
+            // path length
+            write!(stdout, "{path_len}\t")?;
+            // start on path
+            let path_start = step_offset as usize;
+            write!(stdout, "{path_start}\t")?;
+            // end on path
+            let path_end = path_start + al_len;
+            write!(stdout, "{path_end}\t")?;
+            // number of matches
+            {
+                use noodles::sam::record::cigar::{op::Kind, Op};
+
+                fn match_len(op: &Op) -> usize {
+                    match op.kind() {
+                        Kind::Match
+                        | Kind::SequenceMatch
+                        | Kind::SequenceMismatch => op.len(),
+                        _ => 0,
+                    }
+                }
+                let matches =
+                    record.cigar().iter().map(match_len).sum::<usize>();
+                write!(stdout, "{matches}\t")?;
+            }
+            // alignment block length
+            write!(stdout, "{al_len}\t")?;
+            // mapping quality
+            {
+                let score =
+                    record.mapping_quality().map(|q| q.get()).unwrap_or(255u8);
+                write!(stdout, "{score}\t")?;
+            }
+
+            // cigar
+            write!(stdout, "cg:Z:{}", record.cigar())?;
+
+            writeln!(stdout)?;
+        } else {
+        }
+    }
+
+    std::io::stdout().flush()?;
+
+    Ok(())
+}
+
 fn parse_args() -> std::result::Result<Args, pico_args::Error> {
     let mut pargs = pico_args::Arguments::from_env();
 
@@ -519,6 +760,7 @@ fn parse_args() -> std::result::Result<Args, pico_args::Error> {
     let args = Args {
         gfa: pargs.value_from_os_str("--gfa", parse_path)?,
         alignments: pargs.opt_value_from_os_str("--bam", parse_path)?,
+        alignments_gbam: pargs.opt_value_from_os_str("--gbam", parse_path)?,
         path_range,
     };
 
