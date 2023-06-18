@@ -228,15 +228,15 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
-    // let path_index = PathIndex::default();
+    let path_index = PathIndex::from_gfa(&args.gfa)?;
 
-    // if let Some(bam_path) = args.alignments {
-    //     // return main_cmd(path_index, bam_path);
-    // } else if let Some(gbam_path) = args.alignments_gbam {
-    return main_cmd_gbam( args.alignments_gbam.unwrap());
-    // } else if let Some((path, start, end)) = args.path_range {
-    //     // return path_range_cmd(path_index, path, start, end);
-    // }
+    if let Some(bam_path) = args.alignments {
+        return main_cmd(path_index, bam_path);
+    } else if let Some(gbam_path) = args.alignments_gbam {
+        return main_cmd_gbam(path_index, gbam_path);
+    } else if let Some((path, start, end)) = args.path_range {
+        return path_range_cmd(path_index, path, start, end);
+    }
 
     Ok(())
 }
@@ -508,7 +508,7 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
+fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     template.set_all();
@@ -538,6 +538,7 @@ fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
 
         println!("rec.bin.unwrap(): {}", rec.bin.unwrap());
         println!("rec.refid.unwrap(): {}", rec.refid.unwrap());
+        println!("refname: {}", ref_seqs[rec.refid.unwrap() as usize].0);
         println!("rec.mapq.unwrap(): {}", rec.mapq.unwrap());
         println!("rec.pos.unwrap(): {}", rec.pos.unwrap() as i64);
         println!("rec.flag.unwrap(): {}", rec.flag.unwrap());
@@ -545,12 +546,12 @@ fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
         println!("rec.next_pos.unwrap(): {}", rec.next_pos.unwrap() as i64);
         println!("rec.tlen.unwrap(): {}", rec.tlen.unwrap() as i64);
         println!("rec_seq_len: {}", rec_seq_len);
+        // println!("{:?}", String::from_utf8(cigar_buf.clone()).unwrap());
         println!("rec.cigar: {}",  unsafe {std::str::from_utf8_unchecked(&cigar_buf)});
-        println!("\n\n");
-
-        let read_name = unsafe {std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap())};
-        println!("read_name: {:?}", read_name);
         // let read_name =  String::from_utf8(rec.read_name.clone().unwrap()).unwrap();
+        let read_name = unsafe {std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap())};
+        //println!("read_name: {:}", read_name);
+        println!("\n\n");
 
         // query name
         write!(stdout, "{}\t", read_name)?;
@@ -588,8 +589,8 @@ fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
         //
         // // number of matches
         {
-            use noodles::sam::record::cigar::{op::Kind, Op};
-        
+            //use noodles::sam::record::cigar::{op::Kind, Op};
+
             fn match_len(op: &gbam_tools::query::cigar::Op) -> usize {
                 // match op.kind() {
                 //     Kind::Match
@@ -620,6 +621,8 @@ fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
         //write!(stdout, "cg:Z:XXXXXXXXXXXXXX",)?;
 
         writeln!(stdout)?;
+
+        return Ok(())
     }
 
     std::io::stdout().flush()?;
