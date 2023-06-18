@@ -8,6 +8,7 @@ use std::fs::File;
 use gbam_tools::reader::parse_tmplt::ParsingTemplate;
 use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
+use gbam_tools::query::cigar::Op;
 
 #[derive(Debug)]
 struct Args {
@@ -227,15 +228,15 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
-    let path_index = PathIndex::from_gfa(&args.gfa)?;
+    // let path_index = PathIndex::default();
 
-    if let Some(bam_path) = args.alignments {
-        return main_cmd(path_index, bam_path);
-    } else if let Some(gbam_path) = args.alignments_gbam {
-        return main_cmd_gbam(path_index, gbam_path);
-    } else if let Some((path, start, end)) = args.path_range {
-        return path_range_cmd(path_index, path, start, end);
-    }
+    // if let Some(bam_path) = args.alignments {
+    //     // return main_cmd(path_index, bam_path);
+    // } else if let Some(gbam_path) = args.alignments_gbam {
+    return main_cmd_gbam( args.alignments_gbam.unwrap());
+    // } else if let Some((path, start, end)) = args.path_range {
+    //     // return path_range_cmd(path_index, path, start, end);
+    // }
 
     Ok(())
 }
@@ -507,13 +508,15 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
+fn main_cmd_gbam(gbam_path: PathBuf) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     template.set_all();
     let mut reader = Reader::new(file, template).unwrap();
 
-    //let ref_seqs = reader.file_meta.get_ref_seqs();
+    let ref_seqs = reader.file_meta.get_ref_seqs();
+    // dbg!(ref_seqs);
+    // return Ok(());
 
     let mut stdout = std::io::stdout().lock();
 
@@ -533,21 +536,21 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
             cigar_buf.push(op.op_type() as u8);
         });
 
-        // println!("rec.bin.unwrap(): {}", rec.bin.unwrap());
-        // println!("rec.refid.unwrap(): {}", rec.refid.unwrap());
-        // println!("rec.mapq.unwrap(): {}", rec.mapq.unwrap());
-        // println!("rec.pos.unwrap(): {}", rec.pos.unwrap() as i64);
-        // println!("rec.flag.unwrap(): {}", rec.flag.unwrap());
-        // println!("rec.next_ref_id.unwrap(): {}", rec.next_ref_id.unwrap());
-        // println!("rec.next_pos.unwrap(): {}", rec.next_pos.unwrap() as i64);
-        // println!("rec.tlen.unwrap(): {}", rec.tlen.unwrap() as i64);
-        // println!("rec_seq_len: {}", rec_seq_len);
-        // println!("{:?}", String::from_utf8(cigar_buf.clone()).unwrap());
-        // println!("\n\n");
+        println!("rec.bin.unwrap(): {}", rec.bin.unwrap());
+        println!("rec.refid.unwrap(): {}", rec.refid.unwrap());
+        println!("rec.mapq.unwrap(): {}", rec.mapq.unwrap());
+        println!("rec.pos.unwrap(): {}", rec.pos.unwrap() as i64);
+        println!("rec.flag.unwrap(): {}", rec.flag.unwrap());
+        println!("rec.next_ref_id.unwrap(): {}", rec.next_ref_id.unwrap());
+        println!("rec.next_pos.unwrap(): {}", rec.next_pos.unwrap() as i64);
+        println!("rec.tlen.unwrap(): {}", rec.tlen.unwrap() as i64);
+        println!("rec_seq_len: {}", rec_seq_len);
+        println!("rec.cigar: {}",  unsafe {std::str::from_utf8_unchecked(&cigar_buf)});
+        println!("\n\n");
 
-        //let read_name = String::from_utf8(rec.read_name.as_ref().unwrap().to_owned());
-        //println!("read_name: {:?}", read_name);
-        let read_name =  String::from_utf8(rec.read_name.clone().unwrap()).unwrap();
+        let read_name = unsafe {std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap())};
+        println!("read_name: {:?}", read_name);
+        // let read_name =  String::from_utf8(rec.read_name.clone().unwrap()).unwrap();
 
         // query name
         write!(stdout, "{}\t", read_name)?;
@@ -584,21 +587,26 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
         // write!(stdout, "{path_end}\t")?;
         //
         // // number of matches
-        // {
-        //     use noodles::sam::record::cigar::{op::Kind, Op};
-        //
-        //     fn match_len(op: &Op) -> usize {
-        //         match op.kind() {
-        //             Kind::Match
-        //             | Kind::SequenceMatch
-        //             | Kind::SequenceMismatch => op.len(),
-        //             _ => 0,
-        //         }
-        //     }
-        //     let matches =
-        //         record.cigar().iter().map(match_len).sum::<usize>();
-        //     write!(stdout, "{matches}\t")?;
-        // }
+        {
+            use noodles::sam::record::cigar::{op::Kind, Op};
+        
+            fn match_len(op: &gbam_tools::query::cigar::Op) -> usize {
+                // match op.kind() {
+                //     Kind::Match
+                //     | Kind::SequenceMatch
+                //     | Kind::SequenceMismatch => op.len(),
+                //     _ => 0,
+                // }
+                match op.op_type() {
+                    'M' => op.length() as usize,
+                    _ => 0,
+                }
+            }
+            let matches =
+                rec.cigar.as_ref().unwrap().ops().map(match_len).sum::<usize>();
+            println!("\nmatches: {}", matches);
+            // write!(stdout, "{matches}\t")?;
+        }
         // // alignment block length
         // write!(stdout, "{al_len}\t")?;
         // // mapping quality
