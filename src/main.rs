@@ -518,6 +518,7 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     template.set(&Fields::ReadName, true);
     template.set(&Fields::RawCigar, true);
     template.set(&Fields::Mapq, true);
+    template.set(&Fields::Pos, true);
 
     let mut reader = Reader::new(file, template).unwrap();
 
