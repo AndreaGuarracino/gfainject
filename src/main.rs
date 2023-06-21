@@ -9,6 +9,7 @@ use gbam_tools::reader::parse_tmplt::ParsingTemplate;
 use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::query::cigar::Op;
+use gbam_tools::Fields;
 
 #[derive(Debug)]
 struct Args {
@@ -511,7 +512,13 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
 fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
-    template.set_all();
+    // Only fetch fields which are needed.
+    template.set(&Fields::Flags, true);
+    template.set(&Fields::RefID, true);
+    template.set(&Fields::ReadName, true);
+    template.set(&Fields::RawCigar, true);
+    template.set(&Fields::Mapq, true);
+
     let mut reader = Reader::new(file, template).unwrap();
 
     let ref_seqs = reader.file_meta.get_ref_seqs().clone();
