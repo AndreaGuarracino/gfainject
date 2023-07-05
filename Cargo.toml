@@ -14,4 +14,4 @@ flate2 = "1.0"
 btoi = "0.4.2"
 roaring = "0.10"
 crossbeam-channel = "0.5.8"
-gbam_tools = { git = "https://github.com/NickRoz1/gbam", branch = "master" }
+gbam_tools = { git = "https://github.com/NickRoz1/gbam", rev = "526e3908f5340f9ff270d42066fadbaeaffe5a42" }
