@@ -531,7 +531,7 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
 
     while let Some(rec) = records_it.next_rec() {
-        if rec.refid.unwrap() < 0 {
+        if (rec.flag.unwrap() & (0x4) == 4) || rec.refid.unwrap() < 0 {
             continue; // Unmapped reads
         }
         let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
