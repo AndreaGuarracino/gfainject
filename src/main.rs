@@ -572,37 +572,15 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
                 let path_start = step_offset as usize;
                 let path_end = path_start + alignment_span;
 
-                // Parse CIGAR string
-                let converted_cigar = parse_cigar(cigar_str);
-
                 // Output in the same format as the BAM processing
                 writeln!(stdout, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
                     query_name, query_len, query_start, query_end, "+",
-                    path_str, path_len, path_start, path_end, matches, alignment_span, mapping_quality, converted_cigar)?;
+                    path_str, path_len, path_start, path_end, matches, alignment_span, mapping_quality, cigar_str)?;
             }
         }
     }
 
     Ok(())
-}
-
-fn parse_cigar(cigar: &str) -> String {
-    let mut result = String::new();
-    let mut num_buffer = String::new();
-
-    for ch in cigar.chars() {
-        if ch.is_ascii_digit() {
-            num_buffer.push(ch);
-        } else {
-            if !num_buffer.is_empty() {
-                result.push_str(&num_buffer);
-                result.push(ch);
-                num_buffer.clear();
-            }
-        }
-    }
-
-    result
 }
 
 fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
