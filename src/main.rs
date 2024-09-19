@@ -530,14 +530,22 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
             .map(|&f| &f[5..])
             .unwrap_or("");
+        let alignment_span = calculate_alignment_span(cigar_str);
 
         if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
-            let pos_range = (ref_start as u32)..(ref_end as u32);
+            let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
+        
             if let Some(steps) = path_index.path_step_range_iter(ref_name, pos_range) {
                 let mut path_str = String::new();
                 let mut path_len: usize = 0;
 
                 let is_reverse_complemented = strand == "-";
+
+                let mut steps = steps.collect::<Vec<_>>();
+
+                if is_reverse_complemented {
+                    steps.reverse();
+                }
 
                 for (_step_ix, step) in steps {
                     path_len += path_index.segment_lens[(step.node) as usize];
@@ -549,14 +557,18 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
                 // Calculate step_offset
                 let start_pos = ref_start as u32;
                 let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-                let step_offset = start_pos
+                let mut step_offset = start_pos
                     - path_index.path_step_offsets[path_id]
                         .select((start_rank - 1) as u32)
                         .unwrap();
 
+                if is_reverse_complemented {
+                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32 - 1);
+                    step_offset = last_bit;
+                }
+
                 // Calculate path_start, path_end, alignment_span, and matches
                 let path_start = step_offset as usize;
-                let alignment_span = calculate_alignment_span(cigar_str);
                 let path_end = path_start + alignment_span;
                 let matches = calculate_matches(cigar_str);
 
