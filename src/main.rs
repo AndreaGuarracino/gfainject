@@ -7,7 +7,8 @@ use std::{io::BufReader, path::PathBuf};
 #[derive(Debug)]
 struct Args {
     gfa: PathBuf,
-    alignments: Option<PathBuf>,
+    bam: Option<PathBuf>,
+    paf: Option<PathBuf>,
 
     path_range: Option<(String, usize, usize)>,
 }
@@ -217,14 +218,16 @@ impl PathIndex {
 
 fn main() -> Result<()> {
     let Ok(args) = parse_args() else {
-        println!("USAGE: `gfainject --gfa <gfa-path> --bam <bam-path>`");
+        println!("USAGE: `gfainject --gfa <gfa-path> [--bam <bam-path> | --paf <paf-path>]`");
         return Ok(());
     };
 
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
-    if let Some(bam_path) = args.alignments {
+    if let Some(bam_path) = args.bam {
         return main_cmd(path_index, bam_path);
+    } else if let Some(paf_path) = args.paf {
+        return paf_cmd(path_index, paf_path);
     } else if let Some((path, start, end)) = args.path_range {
         return path_range_cmd(path_index, path, start, end);
     }
@@ -499,6 +502,111 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
+    let file = std::fs::File::open(paf_path)?;
+    let reader = BufReader::new(file);
+    let mut stdout = std::io::stdout().lock();
+
+    for line in reader.lines() {
+        let line = line?;
+        let fields: Vec<&str> = line.split('\t').collect();
+
+        if fields.len() < 12 {
+            continue; // Skip invalid lines
+        }
+
+        let query_name = fields[0];
+        let query_len: usize = fields[1].parse()?;
+        let query_start: usize = fields[2].parse()?;
+        let query_end: usize = fields[3].parse()?;
+        let strand = fields[4];
+        let ref_name = fields[5];
+        let ref_len: usize = fields[6].parse()?;
+        let ref_start: usize = fields[7].parse()?;
+        let ref_end: usize = fields[8].parse()?;
+        let mapping_quality: u8 = fields[11].parse()?;
+
+        // Find the cg:Z: tag for CIGAR string
+        let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
+            .map(|&f| &f[5..])
+            .unwrap_or("");
+        let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
+
+
+        if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
+            let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
+        
+            if let Some(steps) = path_index.path_step_range_iter(ref_name, pos_range) {
+                let mut path_str = String::new();
+                let mut path_len: usize = 0;
+
+                let is_reverse_complemented = strand == "-";
+
+                let mut steps = steps.collect::<Vec<_>>();
+
+                if is_reverse_complemented {
+                    steps.reverse();
+                }
+
+                for (_step_ix, step) in steps {
+                    path_len += path_index.segment_lens[(step.node) as usize];
+                    let forward = step.reverse ^ is_reverse_complemented;
+                    use std::fmt::Write;
+                    write!(&mut path_str, "{}{}", if forward { ">" } else { "<" }, step.node + path_index.segment_id_range.0 as u32)?;
+                }
+
+                // Calculate step_offset
+                let start_pos = ref_start as u32;
+                let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
+                let mut step_offset = start_pos
+                    - path_index.path_step_offsets[path_id]
+                        .select((start_rank - 1) as u32)
+                        .unwrap();
+
+                if is_reverse_complemented {
+                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32 - 1);
+                    step_offset = last_bit;
+                }
+
+                // Calculate path_start and path_end
+                let path_start = step_offset as usize;
+                let path_end = path_start + alignment_span;
+
+                // Output in the same format as the BAM processing
+                writeln!(stdout, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+                    query_name, query_len, query_start, query_end, "+",
+                    path_str, path_len, path_start, path_end, matches, alignment_span, mapping_quality, cigar_str)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
+    let mut span = 0;
+    let mut matches = 0;
+    let mut num_buffer = String::with_capacity(4);
+
+    for ch in cigar.chars() {
+        if ch.is_ascii_digit() {
+            num_buffer.push(ch);
+        } else if !num_buffer.is_empty() {
+            let count: usize = num_buffer.parse().unwrap();
+            match ch {
+                'M' | 'D' | 'N' | '=' | 'X' => span += count,
+                _ => {}
+            }
+            if ch == '=' || ch == 'M' {
+                matches += count;
+            }
+            num_buffer.clear();
+        }
+    }
+
+    (span, matches)
+}
+
 fn parse_args() -> std::result::Result<Args, pico_args::Error> {
     let mut pargs = pico_args::Arguments::from_env();
 
@@ -518,7 +626,8 @@ fn parse_args() -> std::result::Result<Args, pico_args::Error> {
 
     let args = Args {
         gfa: pargs.value_from_os_str("--gfa", parse_path)?,
-        alignments: pargs.opt_value_from_os_str("--bam", parse_path)?,
+        bam: pargs.opt_value_from_os_str("--bam", parse_path)?,
+        paf: pargs.opt_value_from_os_str("--paf", parse_path)?,
         path_range,
     };
 
