@@ -530,7 +530,8 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
             .map(|&f| &f[5..])
             .unwrap_or("");
-        let alignment_span = calculate_alignment_span(cigar_str);
+        let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
+
 
         if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
             let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
@@ -567,10 +568,9 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
                     step_offset = last_bit;
                 }
 
-                // Calculate path_start, path_end, alignment_span, and matches
+                // Calculate path_start and path_end
                 let path_start = step_offset as usize;
                 let path_end = path_start + alignment_span;
-                let matches = calculate_matches(cigar_str);
 
                 // Parse CIGAR string
                 let converted_cigar = parse_cigar(cigar_str);
@@ -605,49 +605,28 @@ fn parse_cigar(cigar: &str) -> String {
     result
 }
 
-fn calculate_alignment_span(cigar: &str) -> usize {
+fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
     let mut span = 0;
-    let mut num_buffer = String::new();
-
-    for ch in cigar.chars() {
-        if ch.is_ascii_digit() {
-            num_buffer.push(ch);
-        } else {
-            if !num_buffer.is_empty() {
-                let count: usize = num_buffer.parse().unwrap();
-                match ch {
-                    'M' | 'D' | 'N' | '=' | 'X' => span += count,
-                    _ => {}
-                }
-                num_buffer.clear();
-            }
-        }
-    }
-
-    span
-}
-
-fn calculate_matches(cigar: &str) -> usize {
     let mut matches = 0;
-    let mut num_buffer = String::new();
+    let mut num_buffer = String::with_capacity(4);
 
     for ch in cigar.chars() {
         if ch.is_ascii_digit() {
             num_buffer.push(ch);
-        } else {
-            if !num_buffer.is_empty() {
-                let count: usize = num_buffer.parse().unwrap();
-                match ch {
-                    '=' => matches += count,
-                    'M' => matches += count, // Note: 'M' can include mismatches, but we count it as match for consistency with some tools
-                    _ => {}
-                }
-                num_buffer.clear();
+        } else if !num_buffer.is_empty() {
+            let count: usize = num_buffer.parse().unwrap();
+            match ch {
+                'M' | 'D' | 'N' | '=' | 'X' => span += count,
+                _ => {}
             }
+            if ch == '=' || ch == 'M' {
+                matches += count;
+            }
+            num_buffer.clear();
         }
     }
 
-    matches
+    (span, matches)
 }
 
 fn parse_args() -> std::result::Result<Args, pico_args::Error> {
