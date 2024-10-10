@@ -13,3 +13,5 @@ noodles = { version = "0.29", features = ["sam", "bam", "fasta"]}
 flate2 = "1.0"
 btoi = "0.4.2"
 roaring = "0.10"
+crossbeam-channel = "0.5.8"
+gbam_tools = { git = "https://github.com/NickRoz1/gbam", rev = "242fafb7dfad1dbc368e64d4bc346bf152c8694a" }
