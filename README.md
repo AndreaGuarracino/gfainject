@@ -1,10 +1,10 @@
 # gfainject
 
-`gfainject` is a tool for mapping alignments from BAM or PAF format files to pangenome graphs in a GFA (Graphical Fragment Assembly) format graph. It outputs a GAF (Graph Alignment Format) file with one record per alignment, mapping each alignment to a sequence of steps in the graph.
+`gfainject` is a tool for mapping alignments from BAM, GBAM, or PAF format files to pangenome graphs in a GFA (Graphical Fragment Assembly) format graph. It outputs a GAF (Graph Alignment Format) file with one record per alignment, mapping each alignment to a sequence of steps in the graph.
 
 ## Features
 
-- Supports both BAM and PAF input formats
+- Supports BAM, PAF, and GBAM input formats
 - Maps alignments to GFA paths
 - Outputs results in GAF format
 - Efficient processing of large datasets
@@ -14,13 +14,15 @@
 - Rust programming environment
 - Input files:
   - GFA file containing the pangenome graph
-  - BAM or PAF file with alignments
+  - BAM, PAF, or GBAM file with alignments
 
 ## Usage
 
 ### Building the tool
 
 ```sh
+git clone https://github.com/AndreaGuarracino/gfainject
+cd gfainject
 cargo build --release
 ```
 
@@ -29,6 +31,12 @@ cargo build --release
 For BAM input:
 ```sh
 ./target/release/gfainject --gfa <path_to_gfa> --bam <path_to_bam>
+```
+
+For GBAM input:
+
+```sh
+./target/release/gfainject --gfa <path_to_gfa> --gbam <path_to_gbam>
 ```
 
 For PAF input:
@@ -46,7 +54,7 @@ The tool generates a GAF file to `stdout`. You can redirect this to a file:
 
 ## Important Notes
 
-- The alignment reference names in the BAM or PAF file must match the path names in the GFA file.
+- The alignment reference names in the BAM, PAF, or GBAM file must match the path names in the GFA file.
 
 ## Additional Features
 
