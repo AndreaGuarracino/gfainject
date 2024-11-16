@@ -8,7 +8,6 @@ use std::fs::File;
 use gbam_tools::reader::parse_tmplt::ParsingTemplate;
 use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
-use gbam_tools::query::cigar::Op;
 use gbam_tools::Fields;
 
 #[derive(Debug)]
@@ -225,7 +224,7 @@ impl PathIndex {
 }
 
 fn main() -> Result<()> {
-    let Ok(args) = parse_args() else {
+    let Ok(_args) = parse_args() else {
         println!("USAGE: `gfainject --gfa <gfa-path> [--bam <bam-path> | --paf <paf-path>] | --gbam <gbam-path>`");
         return Ok(());
     };
@@ -342,7 +341,7 @@ fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
         header.build()
     };
 
-    let ref_seqs = bam.read_reference_sequences()?;
+    let _ref_seqs = bam.read_reference_sequences()?;
 
     // for (key, val) in ref_seqs {
     //     let len = val.length();
@@ -597,7 +596,7 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
             if rec.is_reverse_complemented() {
                 // start node offset changes
                 //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
-                let last_bit = path_len as u32 - (step_offset as u32 + rec.cigar.as_ref().unwrap().base_coverage() - 1);
+                let last_bit = path_len as u32 - (step_offset as u32 + rec.alignment_span() as u32 - 1);
                 step_offset = last_bit;
             }
 
@@ -690,9 +689,9 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         let query_end: usize = fields[3].parse()?;
         let strand = fields[4];
         let ref_name = fields[5];
-        let ref_len: usize = fields[6].parse()?;
+        let _ref_len: usize = fields[6].parse()?;
         let ref_start: usize = fields[7].parse()?;
-        let ref_end: usize = fields[8].parse()?;
+        let _ref_end: usize = fields[8].parse()?;
         let mapping_quality: u8 = fields[11].parse()?;
 
         // Find the cg:Z: tag for CIGAR string
