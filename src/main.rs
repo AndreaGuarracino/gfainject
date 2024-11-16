@@ -224,7 +224,7 @@ impl PathIndex {
 }
 
 fn main() -> Result<()> {
-    let Ok(_args) = parse_args() else {
+    let Ok(args) = parse_args() else {
         println!("USAGE: `gfainject --gfa <gfa-path> [--bam <bam-path> | --paf <paf-path>] | --gbam <gbam-path>`");
         return Ok(());
     };
