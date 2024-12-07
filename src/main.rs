@@ -10,31 +10,41 @@ use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::Fields;
 
+/// Command line arguments for the program
 #[derive(Debug)]
 struct Args {
+    /// Path to the input GFA file
     gfa: PathBuf,
-    bam: Option<PathBuf>,
+    /// Optional path to input BAM file
+    bam: Option<PathBuf>, 
+    /// Optional path to input PAF file
     paf: Option<PathBuf>,
+    /// Optional path to input GBAM file 
     gbam: Option<PathBuf>,
-
+    /// Optional path range tuple (path_name, start, end)
     path_range: Option<(String, usize, usize)>,
 }
 
+/// Represents a single step in a path through the graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PathStep {
+    /// Node ID in the path
     node: u32,
+    /// Whether this node is traversed in reverse
     reverse: bool,
 }
 
+/// Index structure for efficient path queries
 struct PathIndex {
+    /// Range of segment IDs (min, max)
     segment_id_range: (usize, usize),
+    /// Length of each segment
     segment_lens: Vec<usize>,
-
+    /// Map from path names to path indices
     path_names: BTreeMap<String, usize>,
-    // path_names: Vec<String>,
+    /// Steps for each path
     path_steps: Vec<Vec<PathStep>>,
-
-    // path_step_offsets: Vec<Vec<usize>>,
+    /// Offset positions for each step in each path
     path_step_offsets: Vec<roaring::RoaringBitmap>,
 }
 
@@ -232,11 +242,11 @@ fn main() -> Result<()> {
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
     if let Some(bam_path) = args.bam {
-        return main_cmd(path_index, bam_path);
+        return bam_injection(path_index, bam_path);
     } else if let Some(paf_path) = args.paf {
-        return paf_cmd(path_index, paf_path);
+        return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
-        return main_cmd_gbam(path_index, gbam_path);
+        return gbam_injection(path_index, gbam_path);
     } else if let Some((path, start, end)) = args.path_range {
         return path_range_cmd(path_index, path, start, end);
     }
@@ -306,7 +316,7 @@ fn path_range_cmd(
     Ok(())
 }
 
-fn main_cmd(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     use noodles::bam;
 
     let Ok(args) = parse_args() else {
@@ -670,7 +680,7 @@ fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
+fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
     let file = std::fs::File::open(paf_path)?;
     let reader = BufReader::new(file);
     let mut stdout = std::io::stdout().lock();
@@ -751,28 +761,34 @@ fn paf_cmd(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Calculate alignment span and number of matches from a CIGAR string
+/// Returns (total_span, num_matches)
 fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
-    let mut span = 0;
-    let mut matches = 0;
+    let mut total_span = 0;
+    let mut num_matches = 0;
     let mut num_buffer = String::with_capacity(4);
 
+    // Parse each character in the CIGAR string
     for ch in cigar.chars() {
         if ch.is_ascii_digit() {
             num_buffer.push(ch);
         } else if !num_buffer.is_empty() {
             let count: usize = num_buffer.parse().unwrap();
+            // Update span for alignment operations
             match ch {
-                'M' | 'D' | 'N' | '=' | 'X' => span += count,
+                'M' | 'D' | 'N' | '=' | 'X' => total_span += count,
                 _ => {}
             }
+            
+            // Count matches separately
             if ch == '=' || ch == 'M' {
-                matches += count;
+                num_matches += count;
             }
             num_buffer.clear();
         }
     }
 
-    (span, matches)
+    (total_span, num_matches)
 }
 
 fn parse_args() -> std::result::Result<Args, pico_args::Error> {
