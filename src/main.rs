@@ -10,48 +10,64 @@ use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::Fields;
 
-use clap::Parser;
+use clap::{Parser, ArgGroup};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
+#[command(group(
+    ArgGroup::new("input_mode")
+        .required(true)
+        .args(["bam", "paf", "gbam", "range"]),
+))]
 struct Args {
     /// Path to input GFA file
-    #[arg(long)]
+    #[arg(short, long, required = true)]
     gfa: PathBuf,
 
     /// Path to input BAM file
-    #[arg(long)]
+    #[arg(short, long)]
     bam: Option<PathBuf>,
 
     /// Path to input PAF file
-    #[arg(long)]
+    #[arg(short, long)]
     paf: Option<PathBuf>,
 
     /// Path to input GBAM file
-    #[arg(long)]
+    #[arg(short, long)]
     gbam: Option<PathBuf>,
 
-    /// Path name for range query
-    #[arg(long)]
-    path: Option<String>,
-
-    /// Start position for range query
-    #[arg(long)]
-    start: Option<usize>,
-
-    /// End position for range query
-    #[arg(long)]
-    end: Option<usize>,
+    /// Range query in format "path_name:start-end"
+    #[arg(short, long, value_parser = parse_range)]
+    range: Option<(String, usize, usize)>,
 }
 
-impl Args {
-    /// Get the path range tuple if all range components are present
-    fn path_range(&self) -> Option<(String, usize, usize)> {
-        match (&self.path, self.start, self.end) {
-            (Some(path), Some(start), Some(end)) => Some((path.clone(), start, end)),
-            _ => None,
-        }
+/// Parse a range string in the format "path_name:start-end"
+/// where path_name can contain ':' and '-' characters
+fn parse_range(s: &str) -> Result<(String, usize, usize), String> {
+    // Find the last colon in the string
+    let last_colon_pos = s.rfind(':').ok_or("Range must include ':' separator".to_string())?;
+    
+    // Split into path_name and range parts
+    let path_name = s[..last_colon_pos].to_string();
+    let range_str = &s[last_colon_pos + 1..];
+
+    // Split the range part by the last hyphen
+    let range_parts: Vec<&str> = range_str.split('-').collect();
+    if range_parts.len() != 2 {
+        return Err("Range must be in format start-end".to_string());
     }
+
+    // Parse start and end positions
+    let start = range_parts[0].parse::<usize>()
+        .map_err(|_| "Invalid start position".to_string())?;
+    let end = range_parts[1].parse::<usize>()
+        .map_err(|_| "Invalid end position".to_string())?;
+
+    if end <= start {
+        return Err("End position must be greater than start position".to_string());
+    }
+
+    Ok((path_name, start, end))
 }
 
 /// Represents a single step in a path through the graph
@@ -264,7 +280,6 @@ impl PathIndex {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
     if let Some(bam_path) = args.bam {
@@ -273,13 +288,12 @@ fn main() -> Result<()> {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
         return gbam_injection(path_index, gbam_path);
-    } else if let Some((path, start, end)) = args.path_range() {
+    } else if let Some((path, start, end)) = args.range {
         return path_range_cmd(path_index, path, start, end);
     }
 
     Ok(())
 }
-
 fn path_range_cmd(
     path_index: PathIndex,
     path_name: String,
