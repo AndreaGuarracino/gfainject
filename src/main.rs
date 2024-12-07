@@ -311,22 +311,19 @@ impl SamFlagInfo {
     }
 }
 
-fn process_query_name(record: &noodles::sam::alignment::record::Record) -> Option<String> {
-    let read_name = record.read_name()?.to_string();
-    let flags = SamFlagInfo::from_flag(record.flags().bits());
-    
+fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
     // Return unmodified name if not paired
     if !flags.is_paired {
-        return Some(read_name);
+        return query_name.to_string();
     }
     
     // Add appropriate suffix based on first/second read
     if flags.is_first {
-        Some(format!("{}_R1", read_name))
+        format!("{}_R1", query_name)
     } else if flags.is_second {
-        Some(format!("{}_R2", read_name))
+        format!("{}_R2", query_name)
     } else {
-        Some(read_name)
+        query_name.to_string()
     }
 }
 
@@ -377,9 +374,11 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
         // }
 
         // Process read name with flags
-        let Some(read_name) = process_query_name(&record) else {
-            continue; // Skip record if name processing fails
+        let Some(read_name) = record.read_name() else {
+            continue;
         };
+        let flags = SamFlagInfo::from_flag(record.flags().bits());
+        let read_name = process_query_name(read_name.as_ref(), flags);
 
         // let name = read_name.to_string();
         // dbg!(&name);
@@ -508,7 +507,7 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
                     record.cigar().iter().map(match_len).sum::<usize>();
                 write!(stdout, "{matches}\t")?;
             }
-          // alignment block length
+            // alignment block length
             write!(stdout, "{al_len}\t")?;
             // mapping quality
             {
@@ -621,7 +620,9 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
 
             // query name
             // let read_name =  String::from_utf8(rec.read_name.clone().unwrap()).unwrap();
-            let read_name = unsafe {std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap())};
+            let read_name = unsafe { std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap()) };
+            let flags = SamFlagInfo::from_flag(rec.flag.unwrap());
+            let read_name = process_query_name(read_name.trim_end_matches('\0'), flags);
 
             write!(stdout, "{}\t", read_name.trim_end_matches('\0'))?;
 
