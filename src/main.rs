@@ -21,23 +21,23 @@ use clap::{Parser, ArgGroup};
 ))]
 struct Args {
     /// Path to input GFA file
-    #[arg(long, required = true)]
+    #[arg(short, long, required = true)]
     gfa: PathBuf,
 
     /// Path to input BAM file
-    #[arg(long)]
+    #[arg(short, long)]
     bam: Option<PathBuf>,
 
     /// Path to input PAF file
-    #[arg(long)]
+    #[arg(short, long)]
     paf: Option<PathBuf>,
 
     /// Path to input GBAM file
-    #[arg(long)]
+    #[arg(short, long)]
     gbam: Option<PathBuf>,
 
     /// Range query in format "path_name:start-end"
-    #[arg(long, value_parser = parse_range)]
+    #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
 }
 
