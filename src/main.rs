@@ -10,19 +10,48 @@ use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::Fields;
 
-/// Command line arguments for the program
-#[derive(Debug)]
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the input GFA file
+    /// Path to input GFA file
+    #[arg(long)]
     gfa: PathBuf,
-    /// Optional path to input BAM file
-    bam: Option<PathBuf>, 
-    /// Optional path to input PAF file
+
+    /// Path to input BAM file
+    #[arg(long)]
+    bam: Option<PathBuf>,
+
+    /// Path to input PAF file
+    #[arg(long)]
     paf: Option<PathBuf>,
-    /// Optional path to input GBAM file 
+
+    /// Path to input GBAM file
+    #[arg(long)]
     gbam: Option<PathBuf>,
-    /// Optional path range tuple (path_name, start, end)
-    path_range: Option<(String, usize, usize)>,
+
+    /// Path name for range query
+    #[arg(long)]
+    path: Option<String>,
+
+    /// Start position for range query
+    #[arg(long)]
+    start: Option<usize>,
+
+    /// End position for range query
+    #[arg(long)]
+    end: Option<usize>,
+}
+
+impl Args {
+    /// Get the path range tuple if all range components are present
+    fn path_range(&self) -> Option<(String, usize, usize)> {
+        match (&self.path, self.start, self.end) {
+            (Some(path), Some(start), Some(end)) => Some((path.clone(), start, end)),
+            _ => None,
+        }
+    }
 }
 
 /// Represents a single step in a path through the graph
@@ -234,10 +263,7 @@ impl PathIndex {
 }
 
 fn main() -> Result<()> {
-    let Ok(args) = parse_args() else {
-        println!("USAGE: `gfainject --gfa <gfa-path> [--bam <bam-path> | --paf <paf-path>] | --gbam <gbam-path>`");
-        return Ok(());
-    };
+    let args = Args::parse();
 
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
@@ -247,7 +273,7 @@ fn main() -> Result<()> {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
         return gbam_injection(path_index, gbam_path);
-    } else if let Some((path, start, end)) = args.path_range {
+    } else if let Some((path, start, end)) = args.path_range() {
         return path_range_cmd(path_index, path, start, end);
     }
 
@@ -318,11 +344,6 @@ fn path_range_cmd(
 
 fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     use noodles::bam;
-
-    let Ok(args) = parse_args() else {
-        println!("USAGE: `gfa-injection --gfa <gfa-path> --bam <bam-path>`");
-        return Ok(());
-    };
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
 
@@ -521,7 +542,7 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn main_cmd_gbam(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -789,37 +810,4 @@ fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
     }
 
     (total_span, num_matches)
-}
-
-fn parse_args() -> std::result::Result<Args, pico_args::Error> {
-    let mut pargs = pico_args::Arguments::from_env();
-
-    let path_range = pargs.opt_value_from_str("--path").and_then(
-        |path: Option<String>| {
-            let start: Option<usize> = pargs.opt_value_from_str("--start")?;
-            let end: Option<usize> = pargs.opt_value_from_str("--end")?;
-            let path_range = path.and_then(|path| {
-                let path: String = path.into();
-                let start = start?;
-                let end = end?;
-                Some((path, start, end))
-            });
-            Ok(path_range)
-        },
-    )?;
-
-    let args = Args {
-        gfa: pargs.value_from_os_str("--gfa", parse_path)?,
-        bam: pargs.opt_value_from_os_str("--bam", parse_path)?,
-        paf: pargs.opt_value_from_os_str("--paf", parse_path)?,
-        gbam: pargs.opt_value_from_os_str("--gbam", parse_path)?,
-
-        path_range,
-    };
-
-    Ok(args)
-}
-
-fn parse_path(s: &std::ffi::OsStr) -> Result<std::path::PathBuf, &'static str> {
-    Ok(s.into())
 }

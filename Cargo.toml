@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.94"
-pico-args = "0.5.0"
+clap = { version = "4.5.22", features = ["derive"] }
 memchr = "2.7.4"
 noodles = { version = "0.31.0", features = ["sam", "bam", "fasta", "core"] }
 flate2 = "1.0.35"
