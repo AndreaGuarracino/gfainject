@@ -718,6 +718,10 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
             .map(|&f| &f[5..])
             .unwrap_or("");
+        if cigar_str.is_empty() || cigar_str == "*" {
+            continue;
+        }
+        
         let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
 
 
