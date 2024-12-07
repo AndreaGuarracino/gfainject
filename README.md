@@ -58,8 +58,8 @@ The tool generates a GAF file to `stdout`. You can redirect this to a file:
 
 ## Additional Features
 
-- Path range querying: You can query a specific range within a path using the `--path`, `--start`, and `--end` options.
+- Path range querying: You can query a specific range within a path using the `--range` option with format "path_name:start-end".
 
 ```sh
-./target/release/gfainject --gfa <path_to_gfa> --path <path_name> --start <start_position> --end <end_position>
+./target/release/gfainject --gfa <path_to_gfa> --range "path_name:1000-2000"
 ```
