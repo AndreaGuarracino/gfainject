@@ -294,66 +294,40 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-fn path_range_cmd(
-    path_index: PathIndex,
-    path_name: String,
-    start: usize,
-    end: usize,
-) -> Result<()> {
-    let path = path_index
-        .path_names
-        .get(&path_name)
-        .expect("Path not found");
 
-    let offsets = path_index.path_step_offsets.get(*path).unwrap();
-    let steps = path_index.path_steps.get(*path).unwrap();
+struct SamFlagInfo {
+    is_paired: bool,
+    is_first: bool,
+    is_second: bool,
+}
 
-    let start_rank = offsets.rank(start as u32);
-    let end_rank = offsets.rank(end as u32);
-
-    let cardinality = offsets.range_cardinality((start as u32)..(end as u32));
-
-    println!("start_rank: {start_rank}");
-    println!("end_rank: {end_rank}");
-    println!("cardinality: {cardinality}");
-
-    println!("------");
-    let skip = (start_rank as usize).checked_sub(1).unwrap_or_default();
-    let take = end_rank as usize - skip;
-
-
-    println!("step_ix\tnode\tpos");
-    // let skip = 0;
-    // let take = 20;
-    for (step_ix, (pos, step)) in
-        offsets.iter().zip(steps).enumerate().skip(skip).take(take)
-    {
-        let node = step.node + path_index.segment_id_range.0 as u32;
-        println!("{step_ix}\t{node}\t{pos}");
-    }
-
-    println!("------------");
-
-    // let start_pos = start.get() as u32;
-    // let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-    // let step_offset = start_pos
-    //     - path_index.path_step_offsets[path_id]
-    //         .select((start_rank - 1) as u32)
-    //         .unwrap();
-
-    // let pos_range = (start.get() as u32)..(1 + end.get() as u32);
-    let pos_range = (start as u32)..(end as u32);
-    if let Some(steps) = path_index.path_step_range_iter(&path_name, pos_range)
-    {
-        for (step_ix, step) in steps {
-            let pos = offsets.select(step_ix as u32).unwrap();
-            //
-            let node = step.node + path_index.segment_id_range.0 as u32;
-            println!("{step_ix}\t{node}\t{pos}");
+impl SamFlagInfo {
+    fn from_flag(flag: u16) -> Self {
+        SamFlagInfo {
+            is_paired: (flag & 0x1) != 0,
+            is_first: (flag & 0x40) != 0,
+            is_second: (flag & 0x80) != 0,
         }
     }
+}
 
-    Ok(())
+fn process_query_name(record: &noodles::sam::alignment::record::Record) -> Option<String> {
+    let read_name = record.read_name()?.to_string();
+    let flags = SamFlagInfo::from_flag(record.flags().bits());
+    
+    // Return unmodified name if not paired
+    if !flags.is_paired {
+        return Some(read_name);
+    }
+    
+    // Add appropriate suffix based on first/second read
+    if flags.is_first {
+        Some(format!("{}_R1", read_name))
+    } else if flags.is_second {
+        Some(format!("{}_R2", read_name))
+    } else {
+        Some(read_name)
+    }
 }
 
 fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
@@ -393,7 +367,6 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
     //     eprintln!("{key}\t{len}");
     // }
 
-
     let mut stdout = std::io::stdout().lock();
 
     for rec in bam.records() {
@@ -403,8 +376,9 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
         //     continue;
         // }
 
-        let Some(read_name) = record.read_name() else {
-            continue;
+        // Process read name with flags
+        let Some(read_name) = process_query_name(&record) else {
+            continue; // Skip record if name processing fails
         };
 
         // let name = read_name.to_string();
@@ -824,4 +798,66 @@ fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
     }
 
     (total_span, num_matches)
+}
+
+fn path_range_cmd(
+    path_index: PathIndex,
+    path_name: String,
+    start: usize,
+    end: usize,
+) -> Result<()> {
+    let path = path_index
+        .path_names
+        .get(&path_name)
+        .expect("Path not found");
+
+    let offsets = path_index.path_step_offsets.get(*path).unwrap();
+    let steps = path_index.path_steps.get(*path).unwrap();
+
+    let start_rank = offsets.rank(start as u32);
+    let end_rank = offsets.rank(end as u32);
+
+    let cardinality = offsets.range_cardinality((start as u32)..(end as u32));
+
+    println!("start_rank: {start_rank}");
+    println!("end_rank: {end_rank}");
+    println!("cardinality: {cardinality}");
+
+    println!("------");
+    let skip = (start_rank as usize).checked_sub(1).unwrap_or_default();
+    let take = end_rank as usize - skip;
+
+
+    println!("step_ix\tnode\tpos");
+    // let skip = 0;
+    // let take = 20;
+    for (step_ix, (pos, step)) in
+        offsets.iter().zip(steps).enumerate().skip(skip).take(take)
+    {
+        let node = step.node + path_index.segment_id_range.0 as u32;
+        println!("{step_ix}\t{node}\t{pos}");
+    }
+
+    println!("------------");
+
+    // let start_pos = start.get() as u32;
+    // let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
+    // let step_offset = start_pos
+    //     - path_index.path_step_offsets[path_id]
+    //         .select((start_rank - 1) as u32)
+    //         .unwrap();
+
+    // let pos_range = (start.get() as u32)..(1 + end.get() as u32);
+    let pos_range = (start as u32)..(end as u32);
+    if let Some(steps) = path_index.path_step_range_iter(&path_name, pos_range)
+    {
+        for (step_ix, step) in steps {
+            let pos = offsets.select(step_ix as u32).unwrap();
+            //
+            let node = step.node + path_index.segment_id_range.0 as u32;
+            println!("{step_ix}\t{node}\t{pos}");
+        }
+    }
+
+    Ok(())
 }
