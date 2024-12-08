@@ -40,9 +40,9 @@ struct Args {
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
 
-    /// Emit alternative alignments from XA tag (only for BAM/GBAM input)
+    /// Emit up to MULTIMAPPING alternative alignments (from XA tag, only for BAM/GBAM input)
     #[arg(long)]
-    multimapping: bool,
+    multimapping: Option<usize>,
 }
 
 /// Parse a range string in the format "path_name:start-end"
@@ -533,7 +533,7 @@ fn process_alignment(
     Ok(())
 }
 
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping: bool) -> Result<()> {
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf, multimapping: Option<usize>) -> Result<()> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -615,37 +615,50 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping:
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
-        // Process alternative alignments if enabled
-        if include_multimapping {
-            use noodles::sam::record::data::field::Tag;
-            use std::str::FromStr;
-    
-            let xa_tag = Tag::from_str("XA").expect("Valid tag");
-            let xa_str = if let Some(field) = record.data().get(xa_tag) {
-                match field.value() {
-                    noodles::sam::record::data::field::Value::String(xa_string) => xa_string,
-                    _ => {
-                        //println!("Unexpected value type for XA field.");
-                        continue;
-                    }
-                }
-            } else {
-                continue;
-            };
+        // Process alternative alignments only if multimapping is specified
+        let Some(max_alt) = multimapping else {
+            continue;
+        };
 
-            for hit in xa_str.split(';') {
-                if !hit.is_empty() {
-                    if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
-                        let alt_alignment = AlignmentInfo {
-                            ref_name: alt_hit.chr,
-                            read_name: read_name.clone(),
-                            //read_len: record.sequence().len(),
-                            ref_start_pos: alt_hit.pos - 1,
-                            is_reverse: !alt_hit.strand,
-                            cigar_str: alt_hit.cigar,
-                            mapping_quality: 255,
-                        };
-                        process_alignment(alt_alignment, &path_index, &mut stdout)?;
+        if max_alt == 0 {
+            continue;
+        }
+
+        use noodles::sam::record::data::field::Tag;
+        use std::str::FromStr;
+
+        let xa_tag = Tag::from_str("XA").expect("Valid tag");
+        let xa_str = if let Some(field) = record.data().get(xa_tag) {
+            match field.value() {
+                noodles::sam::record::data::field::Value::String(xa_string) => xa_string,
+                _ => {
+                    //println!("Unexpected value type for XA field.");
+                    continue;
+                }
+            }
+        } else {
+            continue;
+        };
+
+        let mut alt_count = 0;
+
+        for hit in xa_str.split(';') {
+            if !hit.is_empty() {
+                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                    let alt_alignment = AlignmentInfo {
+                        ref_name: alt_hit.chr,
+                        read_name: read_name.clone(),
+                        //read_len: record.sequence().len(),
+                        ref_start_pos: alt_hit.pos - 1,
+                        is_reverse: !alt_hit.strand,
+                        cigar_str: alt_hit.cigar,
+                        mapping_quality: 255,
+                    };
+                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
+
+                    alt_count += 1;
+                    if alt_count >= max_alt {
+                        break;
                     }
                 }
             }
@@ -681,7 +694,7 @@ fn parse_xa_tag(tags: &[u8]) -> Option<String> {
     None
 }
 
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimapping: bool) -> Result<()> {
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, multimapping: Option<usize>) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -691,7 +704,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimappin
     template.set(&Fields::RawCigar, true);
     template.set(&Fields::Mapq, true);
     template.set(&Fields::Pos, true);
-    if include_multimapping {
+    if multimapping.is_some() {
         template.set(&Fields::RawTags, true); // Need tags for XA field
     }
 
@@ -734,28 +747,43 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimappin
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
-        if include_multimapping {
-            let Some(xa_str) = rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)) else {
-                continue
-            };
+        // Process alternative alignments only if multimapping is specified
+        let Some(max_alt) = multimapping else {
+            continue;
+        };
 
-            for hit in xa_str.split(';') {
-                if !hit.is_empty() {
-                    if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
-                        let alt_alignment = AlignmentInfo {
-                            ref_name: alt_hit.chr,
-                            read_name: read_name.clone(),
-                            //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-                            ref_start_pos: alt_hit.pos - 1,
-                            is_reverse: !alt_hit.strand,
-                            cigar_str: alt_hit.cigar,
-                            mapping_quality: 255,
-                        };
-                        process_alignment(alt_alignment, &path_index, &mut stdout)?;
+        if max_alt == 0 {
+            continue;
+        }
+
+        let Some(xa_str) = rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)) else {
+            continue
+        };
+
+        let mut alt_count = 0;
+
+        for hit in xa_str.split(';') {
+            if !hit.is_empty() {
+                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                    let alt_alignment = AlignmentInfo {
+                        ref_name: alt_hit.chr,
+                        read_name: read_name.clone(),
+                        //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+                        ref_start_pos: alt_hit.pos - 1,
+                        is_reverse: !alt_hit.strand,
+                        cigar_str: alt_hit.cigar,
+                        mapping_quality: 255,
+                    };
+                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
+
+                    alt_count += 1;
+                    if alt_count >= max_alt {
+                        break;
                     }
                 }
             }
         }
+
     }
 
     std::io::stdout().flush()?;
