@@ -98,8 +98,8 @@ struct PathIndex {
 }
 
 struct PathStepRangeIter<'a> {
-    path_id: usize,
-    pos_range: std::ops::Range<u32>,
+    // path_id: usize,
+    // pos_range: std::ops::Range<u32>,
     // start_pos: usize,
     // end_pos: usize,
     steps: Box<dyn Iterator<Item = (usize, &'a PathStep)> + 'a>,
@@ -146,8 +146,8 @@ impl PathIndex {
         };
 
         Some(PathStepRangeIter {
-            path_id,
-            pos_range,
+            // path_id,
+            // pos_range,
             steps,
             // first_step_start_pos,
             // last_step_end_pos,
@@ -321,7 +321,7 @@ struct AlternativeHit {
     strand: bool,  // true for forward (+), false for reverse (-)
     pos: u32,
     cigar: String,
-    nm: u32,
+    // nm: u32,
 }
 
 impl AlternativeHit {
@@ -341,14 +341,14 @@ impl AlternativeHit {
             return None;
         };
         let cigar = parts[2].to_string();
-        let nm = parts[3].parse::<u32>().ok()?;
+        let _nm = parts[3].parse::<u32>().ok()?;
 
         Some(AlternativeHit {
             chr,
             strand,
             pos,
             cigar,
-            nm,
+            // nm,
         })
     }
 }
