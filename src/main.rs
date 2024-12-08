@@ -40,9 +40,9 @@ struct Args {
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
 
-    /// Emit up to MULTIMAPPING alternative alignments (from XA tag, only for BAM/GBAM input)
+    /// Emit up to ALT_HITS alternative alignments (from XA tag, only for BAM/GBAM input)
     #[arg(long)]
-    multimapping: Option<usize>,
+    alt_hits: Option<usize>,
 }
 
 /// Parse a range string in the format "path_name:start-end"
@@ -287,11 +287,11 @@ fn main() -> Result<()> {
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
     if let Some(bam_path) = args.bam {
-        return bam_injection(path_index, bam_path, args.multimapping);
+        return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
-        return gbam_injection(path_index, gbam_path, args.multimapping);
+        return gbam_injection(path_index, gbam_path, args.alt_hits);
     } else if let Some((path, start, end)) = args.range {
         return path_range_cmd(path_index, path, start, end);
     }
@@ -533,7 +533,7 @@ fn process_alignment(
     Ok(())
 }
 
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf, multimapping: Option<usize>) -> Result<()> {
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -615,8 +615,8 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, multimapping: Option<
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
-        // Process alternative alignments only if multimapping is specified
-        let Some(max_alt) = multimapping else {
+        // Process alternative alignments only if requested
+        let Some(max_alt) = alt_hits else {
             continue;
         };
 
@@ -694,7 +694,7 @@ fn parse_xa_tag(tags: &[u8]) -> Option<String> {
     None
 }
 
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, multimapping: Option<usize>) -> Result<()> {
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -704,7 +704,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, multimapping: Optio
     template.set(&Fields::RawCigar, true);
     template.set(&Fields::Mapq, true);
     template.set(&Fields::Pos, true);
-    if multimapping.is_some() {
+    if alt_hits.is_some() {
         template.set(&Fields::RawTags, true); // Need tags for XA field
     }
 
@@ -747,8 +747,8 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, multimapping: Optio
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
-        // Process alternative alignments only if multimapping is specified
-        let Some(max_alt) = multimapping else {
+        // Process alternative alignments only if requested
+        let Some(max_alt) = alt_hits else {
             continue;
         };
 
