@@ -40,7 +40,7 @@ struct Args {
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
 
-    /// Emit alternative alignments from XA tag (only for BAM input)
+    /// Emit alternative alignments from XA tag (only for BAM/GBAM input)
     #[arg(long)]
     multimapping: bool,
 }
@@ -291,7 +291,7 @@ fn main() -> Result<()> {
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
-        return gbam_injection(path_index, gbam_path);
+        return gbam_injection(path_index, gbam_path, args.multimapping);
     } else if let Some((path, start, end)) = args.range {
         return path_range_cmd(path_index, path, start, end);
     }
@@ -638,7 +638,31 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping:
     Ok(())
 }
 
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
+fn parse_xa_tag(tags: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < tags.len() - 2 {
+        // Look for "XA" followed by tag type identifier
+        if tags[i] == b'X' && tags[i + 1] == b'A' && tags[i + 2] == b'Z' {
+            // Skip tag name and type
+            i += 3;
+            let mut result = Vec::new();
+            
+            // Read until null terminator or end of tags
+            while i < tags.len() && tags[i] != 0 {
+                result.push(tags[i]);
+                i += 1;
+            }
+            
+            if !result.is_empty() {
+                return String::from_utf8(result).ok();
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimapping: bool) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -648,6 +672,9 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
     template.set(&Fields::RawCigar, true);
     template.set(&Fields::Mapq, true);
     template.set(&Fields::Pos, true);
+    if include_multimapping {
+        template.set(&Fields::RawTags, true); // Need tags for XA field
+    }
 
     let mut reader = Reader::new(file, template).unwrap();
 
@@ -687,6 +714,29 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
             mapping_quality: rec.mapq.unwrap_or(255),
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
+
+        if include_multimapping {
+            let Some(xa_str) = rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)) else {
+                continue
+            };
+
+            for hit in xa_str.split(';') {
+                if !hit.is_empty() {
+                    if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                        let alt_alignment = AlignmentInfo {
+                            ref_name: alt_hit.chr,
+                            read_name: read_name.clone(),
+                            read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+                            start_pos: alt_hit.pos - 1,
+                            is_reverse: !alt_hit.strand,
+                            cigar_str: alt_hit.cigar,
+                            mapping_quality: 0,
+                        };
+                        process_alignment(alt_alignment, &path_index, &mut stdout)?;
+                    }
+                }
+            }
+        }
     }
 
     std::io::stdout().flush()?;
@@ -715,16 +765,10 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
             continue;
         }
         
-        // let query_name = fields[0];
-        // let query_len: usize = fields[1].parse()?;
         // let query_start: usize = fields[2].parse()?;
         // let query_end: usize = fields[3].parse()?;
-        // let strand = fields[4];
-        // let ref_name = fields[5];
         // let _ref_len: usize = fields[6].parse()?;
-        // let ref_start: usize = fields[7].parse()?;
         // let _ref_end: usize = fields[8].parse()?;
-        // let mapping_quality: u8 = fields[11].parse()?;
 
         let alignment = AlignmentInfo {
             ref_name: fields[5].to_string(),
