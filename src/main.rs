@@ -39,6 +39,10 @@ struct Args {
     /// Range query in format "path_name:start-end"
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
+
+    /// Emit alternative alignments from XA tag (only for BAM input)
+    #[arg(long)]
+    multimapping: bool,
 }
 
 /// Parse a range string in the format "path_name:start-end"
@@ -283,7 +287,7 @@ fn main() -> Result<()> {
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
     if let Some(bam_path) = args.bam {
-        return bam_injection(path_index, bam_path);
+        return bam_injection(path_index, bam_path, args.multimapping);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
@@ -311,6 +315,44 @@ impl SamFlagInfo {
     }
 }
 
+#[derive(Debug)]
+struct AlternativeHit {
+    chr: String,
+    strand: bool,  // true for forward (+), false for reverse (-)
+    pos: u32,
+    cigar: String,
+    nm: u32,
+}
+
+impl AlternativeHit {
+    fn from_xa_str(xa_str: &str) -> Option<Self> {
+        let parts: Vec<&str> = xa_str.split(',').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+
+        let chr = parts[0].to_string();
+        let pos_str = parts[1];
+        let (strand, pos) = if pos_str.starts_with('-') {
+            (false, pos_str[1..].parse::<u32>().ok()?)
+        } else if pos_str.starts_with('+') {
+            (true, pos_str[1..].parse::<u32>().ok()?)
+        } else {
+            return None;
+        };
+        let cigar = parts[2].to_string();
+        let nm = parts[3].parse::<u32>().ok()?;
+
+        Some(AlternativeHit {
+            chr,
+            strand,
+            pos,
+            cigar,
+            nm,
+        })
+    }
+}
+
 fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
     // Return unmodified name if not paired
     if !flags.is_paired {
@@ -327,7 +369,152 @@ fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
     }
 }
 
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
+// Function to write GAF format output
+fn write_gaf_record<W: std::io::Write>(
+    writer: &mut W,
+    read_name: &str,
+    query_len: usize,
+    query_start: usize,
+    query_end: usize,
+    path_str: &str,
+    path_len: usize,
+    path_start: usize,
+    path_end: usize,
+    matches: usize,
+    alignment_span: usize,
+    mapping_quality: u8,
+    cigar: &str,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+        read_name, query_len, query_start, query_end,
+        path_str, path_len, path_start, path_end,
+        matches, alignment_span, mapping_quality, cigar
+    )?;
+    Ok(())
+}
+
+/// Calculate alignment span and number of matches from a CIGAR string
+fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
+    let mut total_span = 0;
+    let mut num_matches = 0;
+    let mut num_buffer = String::with_capacity(4);
+
+    // Parse each character in the CIGAR string
+    for ch in cigar.chars() {
+        if ch.is_ascii_digit() {
+            num_buffer.push(ch);
+        } else if !num_buffer.is_empty() {
+            let count: usize = num_buffer.parse().unwrap();
+            // Update span for alignment operations that consume the reference sequence
+            match ch {
+                'M' | 'D' | 'N' | '=' | 'X' => total_span += count,
+                _ => {} // 'S', 'H', 'P', 'I' do not consume the reference sequence
+            }
+            
+            // Count matches separately
+            if ch == '=' || ch == 'M' {
+                num_matches += count;
+            }
+            num_buffer.clear();
+        }
+    }
+
+    (total_span, num_matches)
+}
+
+#[derive(Debug)]
+struct AlignmentInfo {
+    ref_name: String,
+    read_name: String,
+    read_len: usize,
+    start_pos: u32,
+    is_reverse: bool,
+    cigar_str: String,
+    mapping_quality: u8,
+}
+
+fn process_alignment(
+    alignment: AlignmentInfo,
+    path_index: &PathIndex,
+    stdout: &mut impl std::io::Write,
+) -> Result<()> {
+    if alignment.cigar_str.is_empty() || alignment.cigar_str == "*" {
+        return Ok(());
+    }
+   
+    let Some(path_id) = path_index.path_names.get(&alignment.ref_name).copied() else {
+        return Ok(());
+    };
+
+    let (alignment_span, matches) = calculate_alignment_stats(&alignment.cigar_str);
+    let alignment_end_pos = alignment.start_pos + alignment_span as u32;
+
+    let pos_range = alignment.start_pos..alignment_end_pos;
+
+    if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
+        use std::fmt::Write;
+
+        let mut path_str = String::new();
+        let mut steps = steps.collect::<Vec<_>>();
+        let mut path_len: usize = 0;
+
+        if alignment.is_reverse {
+            steps.reverse();
+        }
+
+        for (_step_ix, step) in steps {
+            // path length is given by the length of nodes in the graph
+            path_len += path_index.segment_lens[step.node as usize];
+            // eprintln!("step_ix: {step_ix}");
+
+            // let reverse = step.reverse;
+            let forward = step.reverse ^ alignment.is_reverse;
+
+            write!(
+                &mut path_str,
+                "{}{}",
+                if forward { ">" } else { "<" },
+                step.node + path_index.segment_id_range.0 as u32
+            )?;
+        }
+
+        let start_rank = path_index.path_step_offsets[path_id].rank(alignment.start_pos);
+        //eprintln!("start_rank = {}", start_rank);
+        let mut step_offset = alignment.start_pos
+            - path_index.path_step_offsets[path_id]
+                .select((start_rank - 1) as u32)
+                .unwrap();
+
+        if alignment.is_reverse {
+            // start node offset changes
+            //let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
+            let last_bit = path_len as u32 - (step_offset + alignment_span as u32);
+            step_offset = last_bit;
+        }
+
+        write_gaf_record(
+            stdout,
+            &alignment.read_name,
+            alignment.read_len,
+            0,
+            alignment.read_len,
+            &path_str,
+            path_len,
+            step_offset as usize,
+            step_offset as usize + alignment_span,
+            matches,
+            alignment_span,
+            alignment.mapping_quality,
+            &alignment.cigar_str,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping: bool) -> Result<()> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -397,130 +584,57 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
             continue;
         };
 
-        let Some(path_id) = path_index.path_names.get(ref_name.as_str()).copied() else {
+        // skip the record if there is no alignment information
+        let (Some(start), Some(_end)) = (record.alignment_start(), record.alignment_end())
+        else {
             continue;
         };
 
-        // skip the record if there is no alignment information
-        if record.alignment_start().is_none() || record.alignment_end().is_none() {
-            continue;
-        }
+        let primary_alignment = AlignmentInfo {
+            ref_name: ref_name.to_string(),
+            read_name: read_name.clone(),
+            read_len: record.sequence().len(),
+            start_pos: (start.get() - 1) as u32,
+            is_reverse: record.flags().is_reverse_complemented(),
+            cigar_str: record.cigar().to_string(),
+            mapping_quality: record.mapping_quality().map(|q| q.get()).unwrap_or(255),
+        };
+        process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
-        let start = record.alignment_start().unwrap();
-        let end = record.alignment_end().unwrap();
-        let al_len = record.alignment_span();
-        //assert!(end - start == al_len);
-
-        let start_pos = (start.get()-1) as u32;
-        let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-        //eprintln!("start_rank = {}", start_rank);
-        let mut step_offset = start_pos
-            - path_index.path_step_offsets[path_id]
-                .select((start_rank - 1) as u32)
-                .unwrap();
-
-        let pos_range = ((start.get()-1) as u32)..((end.get()-1) as u32);
-        if let Some(steps) =
-            path_index.path_step_range_iter(ref_name.as_str(), pos_range)
-        {
-            let mut path_str = String::new();
-
-            let mut steps = steps.collect::<Vec<_>>();
-
-            if record.flags().is_reverse_complemented() {
-                steps.reverse();
-            }
-
-            let mut path_len: usize = 0;
-
-            for (_step_ix, step) in steps {
-                // path length is given by the length of nodes in the graph
-                path_len += path_index.segment_lens[(step.node) as usize];
-                use std::fmt::Write;
-                // eprintln!("step_ix: {step_ix}");
-
-                // let reverse = step.reverse;
-                let forward = step.reverse ^ record.flags().is_reverse_complemented();
-                if forward {
-                    write!(&mut path_str, ">")?;
-                } else {
-                    write!(&mut path_str, "<")?;
-                }
-                write!(
-                    &mut path_str,
-                    "{}",
-                    step.node + path_index.segment_id_range.0 as u32
-                )?;
-            }
-
-            if record.flags().is_reverse_complemented() {
-                // start node offset changes
-                //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
-                let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
-                step_offset = last_bit;
-            }
-
-            // query name
-            write!(stdout, "{}\t", read_name)?;
-
-            // query len
-            let query_len = record.cigar().read_length();
-            write!(stdout, "{query_len}\t")?;
-
-            // query start (0-based, closed)
-            let query_start = 0;
-            write!(stdout, "{query_start}\t")?;
-
-            // query end (0-based, open)
-            write!(stdout, "{}\t", query_start + query_len)?;
-
-            // strand
-            // if record.flags().is_reverse_complemented() {
-            // print!("-\t");
-            // } else {
-            write!(stdout, "+\t")?;
-            // }
-
-            // path
-            write!(stdout, "{path_str}\t")?;
-            // path length
-            write!(stdout, "{path_len}\t")?;
-            // start on path
-            let path_start = step_offset as usize;
-            write!(stdout, "{path_start}\t")?;
-            // end on path
-            let path_end = path_start + al_len;
-            write!(stdout, "{path_end}\t")?;
-            // number of matches
-            {
-                use noodles::sam::record::cigar::{op::Kind, Op};
-
-                fn match_len(op: &Op) -> usize {
-                    match op.kind() {
-                        Kind::Match
-                        | Kind::SequenceMatch
-                        | Kind::SequenceMismatch => op.len(),
-                        _ => 0,
+        // Process alternative alignments if enabled
+        if include_multimapping {
+            use noodles::sam::record::data::field::Tag;
+            use std::str::FromStr;
+    
+            let xa_tag = Tag::from_str("XA").expect("Valid tag");
+            let xa_str = if let Some(field) = record.data().get(xa_tag) {
+                match field.value() {
+                    noodles::sam::record::data::field::Value::String(xa_string) => xa_string,
+                    _ => {
+                        //println!("Unexpected value type for XA field.");
+                        continue;
                     }
                 }
-                let matches =
-                    record.cigar().iter().map(match_len).sum::<usize>();
-                write!(stdout, "{matches}\t")?;
-            }
-            // alignment block length
-            write!(stdout, "{al_len}\t")?;
-            // mapping quality
-            {
-                let score =
-                    record.mapping_quality().map(|q| q.get()).unwrap_or(255u8);
-                write!(stdout, "{score}\t")?;
-            }
+            } else {
+                continue;
+            };
 
-            // cigar
-            write!(stdout, "cg:Z:{}", record.cigar())?;
-
-            writeln!(stdout)?;
-        } else {
+            for hit in xa_str.split(';') {
+                if !hit.is_empty() {
+                    if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                        let alt_alignment = AlignmentInfo {
+                            ref_name: alt_hit.chr,
+                            read_name: read_name.clone(),
+                            read_len: record.sequence().len(),
+                            start_pos: alt_hit.pos - 1,
+                            is_reverse: !alt_hit.strand,
+                            cigar_str: alt_hit.cigar,
+                            mapping_quality: 0,
+                        };
+                        process_alignment(alt_alignment, &path_index, &mut stdout)?;
+                    }
+                }
+            }
         }
     }
 
@@ -554,6 +668,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
         if rec.is_unmapped() || rec.refid.unwrap() < 0 {
             continue; // Unmapped read
         }
+        
         let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
         let Some(path_id) = path_index.path_names.get(ref_name.as_str()).copied() else {
             continue;
@@ -614,7 +729,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
             if rec.is_reverse_complemented() {
                 // start node offset changes
                 //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
-                let last_bit = path_len as u32 - (step_offset as u32 + rec.alignment_span() as u32 - 1);
+                let last_bit = path_len as u32 - (step_offset as u32 + rec.alignment_span() as u32);
                 step_offset = last_bit;
             }
 
@@ -724,7 +839,6 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         
         let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
 
-
         if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
             let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
         
@@ -756,7 +870,7 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
                         .unwrap();
 
                 if is_reverse_complemented {
-                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32 - 1);
+                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32);
                     step_offset = last_bit;
                 }
 
@@ -773,36 +887,6 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Calculate alignment span and number of matches from a CIGAR string
-/// Returns (total_span, num_matches)
-fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
-    let mut total_span = 0;
-    let mut num_matches = 0;
-    let mut num_buffer = String::with_capacity(4);
-
-    // Parse each character in the CIGAR string
-    for ch in cigar.chars() {
-        if ch.is_ascii_digit() {
-            num_buffer.push(ch);
-        } else if !num_buffer.is_empty() {
-            let count: usize = num_buffer.parse().unwrap();
-            // Update span for alignment operations
-            match ch {
-                'M' | 'D' | 'N' | '=' | 'X' => total_span += count,
-                _ => {}
-            }
-            
-            // Count matches separately
-            if ch == '=' || ch == 'M' {
-                num_matches += count;
-            }
-            num_buffer.clear();
-        }
-    }
-
-    (total_span, num_matches)
 }
 
 fn path_range_cmd(
