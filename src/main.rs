@@ -21,7 +21,7 @@ use clap::{Parser, ArgGroup};
 ))]
 struct Args {
     /// Path to input GFA file
-    #[arg(short, long, required = true)]
+    #[arg(long, required = true)]
     gfa: PathBuf,
 
     /// Path to input BAM file
@@ -39,6 +39,10 @@ struct Args {
     /// Range query in format "path_name:start-end"
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
+
+    /// Emit up to ALT_HITS alternative alignments (from XA tag, only for BAM/GBAM input)
+    #[arg(long)]
+    alt_hits: Option<usize>,
 }
 
 /// Parse a range string in the format "path_name:start-end"
@@ -94,8 +98,8 @@ struct PathIndex {
 }
 
 struct PathStepRangeIter<'a> {
-    path_id: usize,
-    pos_range: std::ops::Range<u32>,
+    // path_id: usize,
+    // pos_range: std::ops::Range<u32>,
     // start_pos: usize,
     // end_pos: usize,
     steps: Box<dyn Iterator<Item = (usize, &'a PathStep)> + 'a>,
@@ -142,8 +146,8 @@ impl PathIndex {
         };
 
         Some(PathStepRangeIter {
-            path_id,
-            pos_range,
+            // path_id,
+            // pos_range,
             steps,
             // first_step_start_pos,
             // last_step_end_pos,
@@ -283,17 +287,552 @@ fn main() -> Result<()> {
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
     if let Some(bam_path) = args.bam {
-        return bam_injection(path_index, bam_path);
+        return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path);
     } else if let Some(gbam_path) = args.gbam {
-        return gbam_injection(path_index, gbam_path);
+        return gbam_injection(path_index, gbam_path, args.alt_hits);
     } else if let Some((path, start, end)) = args.range {
         return path_range_cmd(path_index, path, start, end);
     }
 
     Ok(())
 }
+
+struct SamFlagInfo {
+    is_paired: bool,
+    is_first: bool,
+    is_second: bool,
+}
+
+impl SamFlagInfo {
+    fn from_flag(flag: u16) -> Self {
+        SamFlagInfo {
+            is_paired: (flag & 0x1) != 0,
+            is_first: (flag & 0x40) != 0,
+            is_second: (flag & 0x80) != 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AlternativeHit {
+    chr: String,
+    strand: bool,  // true for forward (+), false for reverse (-)
+    pos: u32,
+    cigar: String,
+    // nm: u32,
+}
+
+impl AlternativeHit {
+    fn from_xa_str(xa_str: &str) -> Option<Self> {
+        let parts: Vec<&str> = xa_str.split(',').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+
+        let chr = parts[0].to_string();
+        let pos_str = parts[1];
+        let (strand, pos) = if pos_str.starts_with('-') {
+            (false, pos_str[1..].parse::<u32>().ok()?)
+        } else if pos_str.starts_with('+') {
+            (true, pos_str[1..].parse::<u32>().ok()?)
+        } else {
+            return None;
+        };
+        let cigar = parts[2].to_string();
+        let _nm = parts[3].parse::<u32>().ok()?;
+
+        Some(AlternativeHit {
+            chr,
+            strand,
+            pos,
+            cigar,
+            // nm,
+        })
+    }
+}
+
+fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
+    // Return unmodified name if not paired
+    if !flags.is_paired {
+        return query_name.to_string();
+    }
+    
+    // Add appropriate suffix based on first/second read
+    if flags.is_first {
+        format!("{}/1", query_name)
+    } else if flags.is_second {
+        format!("{}/2", query_name)
+    } else {
+        query_name.to_string()
+    }
+}
+
+// Function to write GAF format output
+fn write_gaf_record<W: std::io::Write>(
+    writer: &mut W,
+    read_name: &str,
+    query_len: usize,
+    query_start: usize,
+    query_end: usize,
+    path_str: &str,
+    path_len: usize,
+    path_start: usize,
+    path_end: usize,
+    matches: usize,
+    alignment_span: usize,
+    mapping_quality: u8,
+    cigar: &str,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+        read_name, query_len, query_start, query_end,
+        path_str, path_len, path_start, path_end,
+        matches, alignment_span, mapping_quality, cigar
+    )?;
+    Ok(())
+}
+
+fn calculate_query_coords_and_align_stats(cigar: &str) -> (usize, usize, usize, usize, usize) {
+    let mut query_start = 0;
+    let mut query_len = 0;
+    let mut query_consumed = 0;     // Track query bases consumed by M/=/X/I operations
+    let mut total_span = 0;         // Total span of alignment operations that consume the reference sequence (M/D/N/=/X operations)
+    let mut num_matches = 0;
+    let mut num_buffer = String::with_capacity(4);
+    let mut found_first_match = false;
+
+    // Parse each character in the CIGAR string
+    for ch in cigar.chars() {
+        if ch.is_ascii_digit() {
+            num_buffer.push(ch);
+        } else if !num_buffer.is_empty() {
+            let count: usize = num_buffer.parse().unwrap();
+            
+            // 'S', 'H', 'P', 'I' do not consume the reference sequence
+            match ch {
+                'S' | 'H' => {
+                    if !found_first_match {
+                        query_start += count;
+                    }
+
+                    query_len += count;
+                }
+                'M' | '=' | 'X' => {
+                    found_first_match = true;
+
+                    query_len += count;
+                    query_consumed += count;
+                    total_span += count;
+                    num_matches += count;
+                }
+                'D' | 'N' => total_span += count,
+                'I' => {
+                    found_first_match = true;
+
+                    query_len += count;
+                    query_consumed += count;
+                }
+                _ => {} // 'P' and others
+            }
+            num_buffer.clear();
+        }
+    }
+
+    (query_len, query_start, query_start + query_consumed, total_span, num_matches)
+}
+
+#[derive(Debug)]
+struct AlignmentInfo {
+    ref_name: String,
+    read_name: String,
+    ref_start_pos: u32,
+    is_reverse: bool,
+    cigar_str: String,
+    mapping_quality: u8,
+}
+
+fn process_alignment(
+    alignment: AlignmentInfo,
+    path_index: &PathIndex,
+    stdout: &mut impl std::io::Write,
+) -> Result<()> {
+    if alignment.cigar_str.is_empty() || alignment.cigar_str == "*" {
+        return Ok(());
+    }
+   
+    let Some(path_id) = path_index.path_names.get(&alignment.ref_name).copied() else {
+        return Ok(());
+    };
+
+    let (query_len, query_start, query_end, alignment_span, num_matches) = calculate_query_coords_and_align_stats(&alignment.cigar_str);
+    let alignment_end_pos = alignment.ref_start_pos + alignment_span as u32;
+
+    let pos_range = alignment.ref_start_pos..alignment_end_pos;
+
+    if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
+        use std::fmt::Write;
+
+        let mut path_str = String::new();
+        let mut steps = steps.collect::<Vec<_>>();
+        let mut path_len: usize = 0;
+
+        if alignment.is_reverse {
+            steps.reverse();
+        }
+
+        for (_step_ix, step) in steps {
+            // path length is given by the length of nodes in the graph
+            path_len += path_index.segment_lens[step.node as usize];
+            // eprintln!("step_ix: {step_ix}");
+
+            // let reverse = step.reverse;
+            let forward = step.reverse ^ alignment.is_reverse;
+
+            write!(
+                &mut path_str,
+                "{}{}",
+                if forward { ">" } else { "<" },
+                step.node + path_index.segment_id_range.0 as u32
+            )?;
+        }
+
+        let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
+        //eprintln!("start_rank = {}", start_rank);
+        let mut step_offset = alignment.ref_start_pos
+            - path_index.path_step_offsets[path_id]
+                .select((start_rank - 1) as u32)
+                .unwrap();
+
+        if alignment.is_reverse {
+            // start node offset changes
+            //let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
+            let last_bit = path_len as u32 - (step_offset + alignment_span as u32);
+            step_offset = last_bit;
+        }
+
+        write_gaf_record(
+            stdout,
+            &alignment.read_name,
+            query_len,
+            query_start,
+            query_end,
+            &path_str,
+            path_len,
+            step_offset as usize,
+            step_offset as usize + alignment_span,
+            num_matches,
+            alignment_span,
+            alignment.mapping_quality,
+            &alignment.cigar_str,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
+    use noodles::bam;
+
+    let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
+
+    let header = {
+        use noodles::sam;
+        // the noodles parse() impl demands that the @HD lines go first,
+        // but that's clearly not a guarantee i can enforce
+        let raw = bam.read_header()?;
+        let mut header = sam::Header::builder();
+
+        for line in raw.lines() {
+            use noodles::sam::header::Record as HRecord;
+            if let Ok(record) = line.parse::<HRecord>() {
+                header = match record {
+                    HRecord::Header(hd) => header.set_header(hd),
+                    HRecord::ReferenceSequence(sq) => {
+                        header.add_reference_sequence(sq)
+                    }
+                    HRecord::ReadGroup(rg) => header.add_read_group(rg),
+                    HRecord::Program(pg) => header.add_program(pg),
+                    HRecord::Comment(co) => header.add_comment(co),
+                };
+            }
+        }
+
+        header.build()
+    };
+
+    // IMPORTANT: this instruction has to be execute to avoid 'Error: invalid read name terminator: expected 0x00, got 0x65'
+    let _ref_seqs = bam.read_reference_sequences()?;
+    // for (key, val) in _ref_seqs {
+    //     let len = val.length();
+    //     eprintln!("{key}\t{len}");
+    // }
+
+    let mut stdout = std::io::stdout().lock();
+
+    for rec in bam.records() {
+        let record = rec?;
+
+        // skip the record if there is no alignment information
+        let (Some(start), Some(_end)) = (record.alignment_start(), record.alignment_end())
+        else {
+            continue;
+        };
+
+        let Some(ref_name) = record
+            .reference_sequence(&header)
+            .and_then(|s| s.ok().map(|s| s.name()))
+        else {
+            continue;
+        };
+
+        // Process read name with flags
+        let Some(read_name) = record.read_name() else {
+            continue;
+        };
+        let flags = SamFlagInfo::from_flag(record.flags().bits());
+        let read_name = process_query_name(read_name.as_ref(), flags);
+
+        // let name = read_name.to_string();
+        // dbg!(&name);
+
+        // convenient for debugging
+        // let name: &str = read_name.as_ref();
+        // if name != "A00404:156:HV37TDSXX:4:1213:6370:23359" {
+        //     continue;
+        // }
+
+        let primary_alignment = AlignmentInfo {
+            ref_name: ref_name.to_string(),
+            read_name: read_name.clone(),
+            //read_len: record.sequence().len(),
+            ref_start_pos: (start.get() - 1) as u32,
+            is_reverse: record.flags().is_reverse_complemented(),
+            cigar_str: record.cigar().to_string(),
+            mapping_quality: record.mapping_quality().map(|q| q.get()).unwrap_or(255),
+        };
+        process_alignment(primary_alignment, &path_index, &mut stdout)?;
+
+        // Process alternative alignments only if requested
+        let Some(max_alt) = alt_hits else {
+            continue;
+        };
+
+        if max_alt == 0 {
+            continue;
+        }
+
+        use noodles::sam::record::data::field::Tag;
+        use std::str::FromStr;
+
+        let xa_tag = Tag::from_str("XA").expect("Valid tag");
+        let xa_str = if let Some(field) = record.data().get(xa_tag) {
+            match field.value() {
+                noodles::sam::record::data::field::Value::String(xa_string) => xa_string,
+                _ => {
+                    //println!("Unexpected value type for XA field.");
+                    continue;
+                }
+            }
+        } else {
+            continue;
+        };
+
+        let mut alt_count = 0;
+
+        for hit in xa_str.split(';') {
+            if !hit.is_empty() {
+                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                    let alt_alignment = AlignmentInfo {
+                        ref_name: alt_hit.chr,
+                        read_name: read_name.clone(),
+                        //read_len: record.sequence().len(),
+                        ref_start_pos: alt_hit.pos - 1,
+                        is_reverse: !alt_hit.strand,
+                        cigar_str: alt_hit.cigar,
+                        mapping_quality: 255,
+                    };
+                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
+
+                    alt_count += 1;
+                    if alt_count >= max_alt {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    std::io::stdout().flush()?;
+
+    Ok(())
+}
+
+fn parse_xa_tag(tags: &[u8]) -> Option<String> {
+    let mut i = 0;
+    while i < tags.len() - 2 {
+        // Look for "XA" followed by tag type identifier
+        if tags[i] == b'X' && tags[i + 1] == b'A' && tags[i + 2] == b'Z' {
+            // Skip tag name and type
+            i += 3;
+            let mut result = Vec::new();
+            
+            // Read until null terminator or end of tags
+            while i < tags.len() && tags[i] != 0 {
+                result.push(tags[i]);
+                i += 1;
+            }
+            
+            if !result.is_empty() {
+                return String::from_utf8(result).ok();
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
+    let file = File::open(gbam_path.clone()).unwrap();
+    let mut template = ParsingTemplate::new();
+    // Only fetch fields which are needed.
+    template.set(&Fields::Flags, true);
+    template.set(&Fields::RefID, true);
+    template.set(&Fields::ReadName, true);
+    template.set(&Fields::RawCigar, true);
+    template.set(&Fields::Mapq, true);
+    template.set(&Fields::Pos, true);
+    if alt_hits.is_some() {
+        template.set(&Fields::RawTags, true); // Need tags for XA field
+    }
+
+    let mut reader = Reader::new(file, template).unwrap();
+
+    let ref_seqs = reader.file_meta.get_ref_seqs().clone();
+    // dbg!(&ref_seqs);
+    // return Ok(());
+
+    let mut records_it = Records::new(&mut reader);
+
+    let mut stdout = std::io::stdout().lock();
+
+    while let Some(rec) = records_it.next_rec() {
+        if rec.is_unmapped() || rec.refid.unwrap() < 0 {
+            continue; // Unmapped read
+        }
+        
+        // skip the record if there is no alignment information
+        let (Some(start), Some(_end)) = (rec.alignment_start(), rec.alignment_end())
+        else {
+            continue;
+        };
+
+        let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
+        
+        // Process read name with flags
+        let read_name = unsafe { std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap()) };
+        let flags = SamFlagInfo::from_flag(rec.flag.unwrap());
+        let read_name = process_query_name(read_name.trim_end_matches('\0'), flags);
+
+        let primary_alignment = AlignmentInfo {
+            ref_name: ref_name.to_string(),
+            read_name: read_name.clone(),
+            //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+            ref_start_pos: start as u32, // already 0-based
+            is_reverse: rec.is_reverse_complemented(),
+            cigar_str: rec.cigar.as_ref().unwrap().to_string(),
+            mapping_quality: rec.mapq.unwrap_or(255),
+        };
+        process_alignment(primary_alignment, &path_index, &mut stdout)?;
+
+        // Process alternative alignments only if requested
+        let Some(max_alt) = alt_hits else {
+            continue;
+        };
+
+        if max_alt == 0 {
+            continue;
+        }
+
+        let Some(xa_str) = rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)) else {
+            continue
+        };
+
+        let mut alt_count = 0;
+
+        for hit in xa_str.split(';') {
+            if !hit.is_empty() {
+                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
+                    let alt_alignment = AlignmentInfo {
+                        ref_name: alt_hit.chr,
+                        read_name: read_name.clone(),
+                        //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+                        ref_start_pos: alt_hit.pos - 1,
+                        is_reverse: !alt_hit.strand,
+                        cigar_str: alt_hit.cigar,
+                        mapping_quality: 255,
+                    };
+                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
+
+                    alt_count += 1;
+                    if alt_count >= max_alt {
+                        break;
+                    }
+                }
+            }
+        }
+
+    }
+
+    std::io::stdout().flush()?;
+
+    Ok(())
+}
+
+fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
+    let file = std::fs::File::open(paf_path)?;
+    let reader = BufReader::new(file);
+    let mut stdout = std::io::stdout().lock();
+
+    for line in reader.lines() {
+        let line = line?;
+        let fields: Vec<&str> = line.split('\t').collect();
+
+        if fields.len() < 12 {
+            continue; // Skip invalid lines
+        }
+
+        // Find the cg:Z: tag for CIGAR string
+        let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
+            .map(|&f| &f[5..])
+            .unwrap_or("");
+        if cigar_str.is_empty() || cigar_str == "*" {
+            continue;
+        }
+        
+        // let query_len: usize = fields[1].parse()?;
+        // let query_start: usize = fields[2].parse()?;
+        // let query_end: usize = fields[3].parse()?;
+        // let _ref_len: usize = fields[6].parse()?;
+        // let _ref_end: usize = fields[8].parse()?;
+
+        let alignment = AlignmentInfo {
+            ref_name: fields[5].to_string(),
+            read_name: fields[0].to_string(),
+            //read_len: fields[1].parse()?,
+            ref_start_pos: fields[7].parse::<u32>()?, // already 0-based
+            is_reverse: fields[4] == "-",
+            cigar_str: cigar_str.to_string(),
+            mapping_quality: fields[11].parse()?,
+        };
+        process_alignment(alignment, &path_index, &mut stdout)?;
+    }
+
+    Ok(())
+}
+
 fn path_range_cmd(
     path_index: PathIndex,
     path_name: String,
@@ -354,474 +893,4 @@ fn path_range_cmd(
     }
 
     Ok(())
-}
-
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf) -> Result<()> {
-    use noodles::bam;
-
-    let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
-
-    let header = {
-        use noodles::sam;
-        // the noodles parse() impl demands that the @HD lines go first,
-        // but that's clearly not a guarantee i can enforce
-        let raw = bam.read_header()?;
-        let mut header = sam::Header::builder();
-
-        for line in raw.lines() {
-            use noodles::sam::header::Record as HRecord;
-            if let Ok(record) = line.parse::<HRecord>() {
-                header = match record {
-                    HRecord::Header(hd) => header.set_header(hd),
-                    HRecord::ReferenceSequence(sq) => {
-                        header.add_reference_sequence(sq)
-                    }
-                    HRecord::ReadGroup(rg) => header.add_read_group(rg),
-                    HRecord::Program(pg) => header.add_program(pg),
-                    HRecord::Comment(co) => header.add_comment(co),
-                };
-            }
-        }
-
-        header.build()
-    };
-
-    let _ref_seqs = bam.read_reference_sequences()?;
-
-    // for (key, val) in ref_seqs {
-    //     let len = val.length();
-    //     eprintln!("{key}\t{len}");
-    // }
-
-
-    let mut stdout = std::io::stdout().lock();
-
-    for rec in bam.records() {
-        let record = rec?;
-
-        // if record.flags().is_reverse_complemented() {
-        //     continue;
-        // }
-
-        let Some(read_name) = record.read_name() else {
-            continue;
-        };
-
-        // let name = read_name.to_string();
-        // dbg!(&name);
-        // let name = std::str::from_utf8(read_name.to_)?;
-
-        // convenient for debugging
-        // let name: &str = read_name.as_ref();
-        // if name != "A00404:156:HV37TDSXX:4:1213:6370:23359" {
-        //     continue;
-        // }
-
-        let Some(ref_name) = record
-                    .reference_sequence(&header)
-                    .and_then(|s| s.ok().map(|s| s.name()))
-        else {
-            continue;
-        };
-
-        let Some(path_id) = path_index.path_names.get(ref_name.as_str()).copied() else {
-            continue;
-        };
-
-        // skip the record if there is no alignment information
-        if record.alignment_start().is_none() || record.alignment_end().is_none() {
-            continue;
-        }
-
-        let start = record.alignment_start().unwrap();
-        let end = record.alignment_end().unwrap();
-        let al_len = record.alignment_span();
-        //assert!(end - start == al_len);
-
-        let start_pos = (start.get()-1) as u32;
-        let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-        //eprintln!("start_rank = {}", start_rank);
-        let mut step_offset = start_pos
-            - path_index.path_step_offsets[path_id]
-                .select((start_rank - 1) as u32)
-                .unwrap();
-
-        let pos_range = ((start.get()-1) as u32)..((end.get()-1) as u32);
-        if let Some(steps) =
-            path_index.path_step_range_iter(ref_name.as_str(), pos_range)
-        {
-            let mut path_str = String::new();
-
-            let mut steps = steps.collect::<Vec<_>>();
-
-            if record.flags().is_reverse_complemented() {
-                steps.reverse();
-            }
-
-            let mut path_len: usize = 0;
-
-            for (_step_ix, step) in steps {
-                // path length is given by the length of nodes in the graph
-                path_len += path_index.segment_lens[(step.node) as usize];
-                use std::fmt::Write;
-                // eprintln!("step_ix: {step_ix}");
-
-                // let reverse = step.reverse;
-                let forward = step.reverse ^ record.flags().is_reverse_complemented();
-                if forward {
-                    write!(&mut path_str, ">")?;
-                } else {
-                    write!(&mut path_str, "<")?;
-                }
-                write!(
-                    &mut path_str,
-                    "{}",
-                    step.node + path_index.segment_id_range.0 as u32
-                )?;
-            }
-
-            if record.flags().is_reverse_complemented() {
-                // start node offset changes
-                //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
-                let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
-                step_offset = last_bit;
-            }
-
-            // query name
-            write!(stdout, "{}\t", read_name)?;
-
-            // query len
-            let query_len = record.cigar().read_length();
-            write!(stdout, "{query_len}\t")?;
-
-            // query start (0-based, closed)
-            let query_start = 0;
-            write!(stdout, "{query_start}\t")?;
-
-            // query end (0-based, open)
-            write!(stdout, "{}\t", query_start + query_len)?;
-
-            // strand
-            // if record.flags().is_reverse_complemented() {
-            // print!("-\t");
-            // } else {
-            write!(stdout, "+\t")?;
-            // }
-
-            // path
-            write!(stdout, "{path_str}\t")?;
-            // path length
-            write!(stdout, "{path_len}\t")?;
-            // start on path
-            let path_start = step_offset as usize;
-            write!(stdout, "{path_start}\t")?;
-            // end on path
-            let path_end = path_start + al_len;
-            write!(stdout, "{path_end}\t")?;
-            // number of matches
-            {
-                use noodles::sam::record::cigar::{op::Kind, Op};
-
-                fn match_len(op: &Op) -> usize {
-                    match op.kind() {
-                        Kind::Match
-                        | Kind::SequenceMatch
-                        | Kind::SequenceMismatch => op.len(),
-                        _ => 0,
-                    }
-                }
-                let matches =
-                    record.cigar().iter().map(match_len).sum::<usize>();
-                write!(stdout, "{matches}\t")?;
-            }
-          // alignment block length
-            write!(stdout, "{al_len}\t")?;
-            // mapping quality
-            {
-                let score =
-                    record.mapping_quality().map(|q| q.get()).unwrap_or(255u8);
-                write!(stdout, "{score}\t")?;
-            }
-
-            // cigar
-            write!(stdout, "cg:Z:{}", record.cigar())?;
-
-            writeln!(stdout)?;
-        } else {
-        }
-    }
-
-    std::io::stdout().flush()?;
-
-    Ok(())
-}
-
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
-    let file = File::open(gbam_path.clone()).unwrap();
-    let mut template = ParsingTemplate::new();
-    // Only fetch fields which are needed.
-    template.set(&Fields::Flags, true);
-    template.set(&Fields::RefID, true);
-    template.set(&Fields::ReadName, true);
-    template.set(&Fields::RawCigar, true);
-    template.set(&Fields::Mapq, true);
-    template.set(&Fields::Pos, true);
-
-    let mut reader = Reader::new(file, template).unwrap();
-
-    let ref_seqs = reader.file_meta.get_ref_seqs().clone();
-    // dbg!(&ref_seqs);
-    // return Ok(());
-
-    let mut records_it = Records::new(&mut reader);
-
-    let mut stdout = std::io::stdout().lock();
-
-    while let Some(rec) = records_it.next_rec() {
-        if rec.is_unmapped() || rec.refid.unwrap() < 0 {
-            continue; // Unmapped read
-        }
-        let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
-        let Some(path_id) = path_index.path_names.get(ref_name.as_str()).copied() else {
-            continue;
-        };
-
-        // skip the record if there is no alignment information
-        if rec.alignment_start().is_none() || rec.alignment_end().is_none() {
-            continue;
-        }
-
-        let start = rec.alignment_start().unwrap();
-        let end = rec.alignment_end().unwrap();
-        let al_len = rec.alignment_span() as usize;
-        //assert!(end - start == al_len);
-
-        let start_pos = start as u32;
-        let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-        //eprintln!("start_rank = {}", start_rank);
-        let mut step_offset = start_pos
-            - path_index.path_step_offsets[path_id]
-            .select((start_rank - 1) as u32)
-            .unwrap();
-
-        let pos_range = ((start) as u32)..((end) as u32);
-        if let Some(steps) =
-            path_index.path_step_range_iter(ref_name.as_str(), pos_range)
-        {
-            let mut path_str = String::new();
-
-            let mut steps = steps.collect::<Vec<_>>();
-
-            if rec.is_reverse_complemented() {
-                steps.reverse();
-            }
-
-            let mut path_len: usize = 0;
-
-            for (_step_ix, step) in steps {
-                // path length is given by the length of nodes in the graph
-                path_len += path_index.segment_lens[(step.node) as usize];
-                use std::fmt::Write;
-                // eprintln!("step_ix: {step_ix}");
-
-                // let reverse = step.reverse;
-                let forward = step.reverse ^ rec.is_reverse_complemented();
-                if forward {
-                    write!(&mut path_str, ">")?;
-                } else {
-                    write!(&mut path_str, "<")?;
-                }
-                write!(
-                    &mut path_str,
-                    "{}",
-                    step.node + path_index.segment_id_range.0 as u32
-                )?;
-            }
-
-            if rec.is_reverse_complemented() {
-                // start node offset changes
-                //println!("is rev {} {} {}", path_len, step_offset, record.cigar().alignment_span());
-                let last_bit = path_len as u32 - (step_offset as u32 + rec.alignment_span() as u32 - 1);
-                step_offset = last_bit;
-            }
-
-            // query name
-            // let read_name =  String::from_utf8(rec.read_name.clone().unwrap()).unwrap();
-            let read_name = unsafe {std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap())};
-
-            write!(stdout, "{}\t", read_name.trim_end_matches('\0'))?;
-
-            // query len
-            let query_len = rec.cigar.as_ref().unwrap().read_length();
-            write!(stdout, "{query_len}\t")?;
-
-            //todo to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            // query start (0-based, closed)
-            let query_start = 0;
-            write!(stdout, "{query_start}\t")?;
-
-            // query end (0-based, open)
-            write!(stdout, "{}\t", query_start + query_len)?;
-
-            //todo to check!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            // strand
-            // if rec.is_reverse_complemented() {
-            // print!("-\t");
-            // } else {
-            write!(stdout, "+\t")?;
-            // }
-
-            // path
-            write!(stdout, "{path_str}\t")?;
-            // path length
-            write!(stdout, "{path_len}\t")?;
-            // start on path
-            let path_start = step_offset as usize;
-            write!(stdout, "{path_start}\t")?;
-            // end on path
-            let path_end = path_start + al_len;
-            write!(stdout, "{path_end}\t")?;
-            // number of matches
-            {
-                fn match_len(op: &gbam_tools::query::cigar::Op) -> usize {
-                    match op.op_type() {
-                        'M' | '=' | 'X' => op.length() as usize,
-                        _ => 0,
-                    }
-                }
-                let matches =
-                    rec.cigar.as_ref().unwrap().ops().map(match_len).sum::<usize>();
-                //println!("\nmatches: {}", matches);
-                write!(stdout, "{matches}\t")?;
-            }
-            // alignment block length
-            write!(stdout, "{al_len}\t")?;
-            // mapping quality
-            {
-                let score =
-                    rec.mapq.map(|q| q).unwrap_or(255u8);
-                write!(stdout, "{score}\t")?;
-            }
-
-            // cigar
-            write!(stdout, "cg:Z:{}",rec.cigar.as_ref().unwrap())?;
-
-            writeln!(stdout)?;
-        }
-    }
-
-    std::io::stdout().flush()?;
-
-    Ok(())
-}
-
-fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
-    let file = std::fs::File::open(paf_path)?;
-    let reader = BufReader::new(file);
-    let mut stdout = std::io::stdout().lock();
-
-    for line in reader.lines() {
-        let line = line?;
-        let fields: Vec<&str> = line.split('\t').collect();
-
-        if fields.len() < 12 {
-            continue; // Skip invalid lines
-        }
-
-        let query_name = fields[0];
-        let query_len: usize = fields[1].parse()?;
-        let query_start: usize = fields[2].parse()?;
-        let query_end: usize = fields[3].parse()?;
-        let strand = fields[4];
-        let ref_name = fields[5];
-        let _ref_len: usize = fields[6].parse()?;
-        let ref_start: usize = fields[7].parse()?;
-        let _ref_end: usize = fields[8].parse()?;
-        let mapping_quality: u8 = fields[11].parse()?;
-
-        // Find the cg:Z: tag for CIGAR string
-        let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
-            .map(|&f| &f[5..])
-            .unwrap_or("");
-        let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
-
-
-        if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
-            let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
-        
-            if let Some(steps) = path_index.path_step_range_iter(ref_name, pos_range) {
-                let mut path_str = String::new();
-                let mut path_len: usize = 0;
-
-                let is_reverse_complemented = strand == "-";
-
-                let mut steps = steps.collect::<Vec<_>>();
-
-                if is_reverse_complemented {
-                    steps.reverse();
-                }
-
-                for (_step_ix, step) in steps {
-                    path_len += path_index.segment_lens[(step.node) as usize];
-                    let forward = step.reverse ^ is_reverse_complemented;
-                    use std::fmt::Write;
-                    write!(&mut path_str, "{}{}", if forward { ">" } else { "<" }, step.node + path_index.segment_id_range.0 as u32)?;
-                }
-
-                // Calculate step_offset
-                let start_pos = ref_start as u32;
-                let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-                let mut step_offset = start_pos
-                    - path_index.path_step_offsets[path_id]
-                        .select((start_rank - 1) as u32)
-                        .unwrap();
-
-                if is_reverse_complemented {
-                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32 - 1);
-                    step_offset = last_bit;
-                }
-
-                // Calculate path_start and path_end
-                let path_start = step_offset as usize;
-                let path_end = path_start + alignment_span;
-
-                // Output in the same format as the BAM processing
-                writeln!(stdout, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-                    query_name, query_len, query_start, query_end, "+",
-                    path_str, path_len, path_start, path_end, matches, alignment_span, mapping_quality, cigar_str)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Calculate alignment span and number of matches from a CIGAR string
-/// Returns (total_span, num_matches)
-fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
-    let mut total_span = 0;
-    let mut num_matches = 0;
-    let mut num_buffer = String::with_capacity(4);
-
-    // Parse each character in the CIGAR string
-    for ch in cigar.chars() {
-        if ch.is_ascii_digit() {
-            num_buffer.push(ch);
-        } else if !num_buffer.is_empty() {
-            let count: usize = num_buffer.parse().unwrap();
-            // Update span for alignment operations
-            match ch {
-                'M' | 'D' | 'N' | '=' | 'X' => total_span += count,
-                _ => {}
-            }
-            
-            // Count matches separately
-            if ch == '=' || ch == 'M' {
-                num_matches += count;
-            }
-            num_buffer.clear();
-        }
-    }
-
-    (total_span, num_matches)
 }
