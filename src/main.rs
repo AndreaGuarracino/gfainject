@@ -21,7 +21,7 @@ use clap::{Parser, ArgGroup};
 ))]
 struct Args {
     /// Path to input GFA file
-    #[arg(short, long, required = true)]
+    #[arg(long, required = true)]
     gfa: PathBuf,
 
     /// Path to input BAM file
