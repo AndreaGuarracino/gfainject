@@ -361,9 +361,9 @@ fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
     
     // Add appropriate suffix based on first/second read
     if flags.is_first {
-        format!("{}_R1", query_name)
+        format!("{}/1", query_name)
     } else if flags.is_second {
-        format!("{}_R2", query_name)
+        format!("{}/2", query_name)
     } else {
         query_name.to_string()
     }
