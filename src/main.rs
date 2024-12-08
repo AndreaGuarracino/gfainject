@@ -643,7 +643,7 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping:
                             ref_start_pos: alt_hit.pos - 1,
                             is_reverse: !alt_hit.strand,
                             cigar_str: alt_hit.cigar,
-                            mapping_quality: 0,
+                            mapping_quality: 255,
                         };
                         process_alignment(alt_alignment, &path_index, &mut stdout)?;
                     }
@@ -749,7 +749,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimappin
                             ref_start_pos: alt_hit.pos - 1,
                             is_reverse: !alt_hit.strand,
                             cigar_str: alt_hit.cigar,
-                            mapping_quality: 0,
+                            mapping_quality: 255,
                         };
                         process_alignment(alt_alignment, &path_index, &mut stdout)?;
                     }
