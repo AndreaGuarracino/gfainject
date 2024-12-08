@@ -681,7 +681,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf) -> Result<()> {
             ref_name: ref_name.to_string(),
             read_name: read_name.clone(),
             read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-            start_pos: (start - 1) as u32,
+            start_pos: start as u32, // already 0-based
             is_reverse: rec.is_reverse_complemented(),
             cigar_str: rec.cigar.as_ref().unwrap().to_string(),
             mapping_quality: rec.mapq.unwrap_or(255),
