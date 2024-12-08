@@ -395,11 +395,14 @@ fn write_gaf_record<W: std::io::Write>(
     Ok(())
 }
 
-/// Calculate alignment span and number of matches from a CIGAR string
-fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
-    let mut total_span = 0;
+fn calculate_query_coords_and_align_stats(cigar: &str) -> (usize, usize, usize, usize, usize) {
+    let mut query_start = 0;
+    let mut query_len = 0;
+    let mut query_consumed = 0;     // Track query bases consumed by M/=/X/I operations
+    let mut total_span = 0;         // Total span of alignment operations that consume the reference sequence (M/D/N/=/X operations)
     let mut num_matches = 0;
     let mut num_buffer = String::with_capacity(4);
+    let mut found_first_match = false;
 
     // Parse each character in the CIGAR string
     for ch in cigar.chars() {
@@ -407,29 +410,45 @@ fn calculate_alignment_stats(cigar: &str) -> (usize, usize) {
             num_buffer.push(ch);
         } else if !num_buffer.is_empty() {
             let count: usize = num_buffer.parse().unwrap();
-            // Update span for alignment operations that consume the reference sequence
-            match ch {
-                'M' | 'D' | 'N' | '=' | 'X' => total_span += count,
-                _ => {} // 'S', 'H', 'P', 'I' do not consume the reference sequence
-            }
             
-            // Count matches separately
-            if ch == '=' || ch == 'M' {
-                num_matches += count;
+            // 'S', 'H', 'P', 'I' do not consume the reference sequence
+            match ch {
+                'S' | 'H' => {
+                    if !found_first_match {
+                        query_start += count;
+                    }
+
+                    query_len += count;
+                }
+                'M' | '=' | 'X' => {
+                    found_first_match = true;
+
+                    query_len += count;
+                    query_consumed += count;
+                    total_span += count;
+                    num_matches += count;
+                }
+                'D' | 'N' => total_span += count,
+                'I' => {
+                    found_first_match = true;
+
+                    query_len += count;
+                    query_consumed += count;
+                }
+                _ => {} // 'P' and others
             }
             num_buffer.clear();
         }
     }
 
-    (total_span, num_matches)
+    (query_len, query_start, query_start + query_consumed, total_span, num_matches)
 }
 
 #[derive(Debug)]
 struct AlignmentInfo {
     ref_name: String,
     read_name: String,
-    read_len: usize,
-    start_pos: u32,
+    ref_start_pos: u32,
     is_reverse: bool,
     cigar_str: String,
     mapping_quality: u8,
@@ -448,10 +467,10 @@ fn process_alignment(
         return Ok(());
     };
 
-    let (alignment_span, matches) = calculate_alignment_stats(&alignment.cigar_str);
-    let alignment_end_pos = alignment.start_pos + alignment_span as u32;
+    let (query_len, query_start, query_end, alignment_span, num_matches) = calculate_query_coords_and_align_stats(&alignment.cigar_str);
+    let alignment_end_pos = alignment.ref_start_pos + alignment_span as u32;
 
-    let pos_range = alignment.start_pos..alignment_end_pos;
+    let pos_range = alignment.ref_start_pos..alignment_end_pos;
 
     if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
         use std::fmt::Write;
@@ -480,9 +499,9 @@ fn process_alignment(
             )?;
         }
 
-        let start_rank = path_index.path_step_offsets[path_id].rank(alignment.start_pos);
+        let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
         //eprintln!("start_rank = {}", start_rank);
-        let mut step_offset = alignment.start_pos
+        let mut step_offset = alignment.ref_start_pos
             - path_index.path_step_offsets[path_id]
                 .select((start_rank - 1) as u32)
                 .unwrap();
@@ -497,14 +516,14 @@ fn process_alignment(
         write_gaf_record(
             stdout,
             &alignment.read_name,
-            alignment.read_len,
-            0,
-            alignment.read_len,
+            query_len,
+            query_start,
+            query_end,
             &path_str,
             path_len,
             step_offset as usize,
             step_offset as usize + alignment_span,
-            matches,
+            num_matches,
             alignment_span,
             alignment.mapping_quality,
             &alignment.cigar_str,
@@ -588,8 +607,8 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping:
         let primary_alignment = AlignmentInfo {
             ref_name: ref_name.to_string(),
             read_name: read_name.clone(),
-            read_len: record.sequence().len(),
-            start_pos: (start.get() - 1) as u32,
+            //read_len: record.sequence().len(),
+            ref_start_pos: (start.get() - 1) as u32,
             is_reverse: record.flags().is_reverse_complemented(),
             cigar_str: record.cigar().to_string(),
             mapping_quality: record.mapping_quality().map(|q| q.get()).unwrap_or(255),
@@ -620,8 +639,8 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, include_multimapping:
                         let alt_alignment = AlignmentInfo {
                             ref_name: alt_hit.chr,
                             read_name: read_name.clone(),
-                            read_len: record.sequence().len(),
-                            start_pos: alt_hit.pos - 1,
+                            //read_len: record.sequence().len(),
+                            ref_start_pos: alt_hit.pos - 1,
                             is_reverse: !alt_hit.strand,
                             cigar_str: alt_hit.cigar,
                             mapping_quality: 0,
@@ -707,8 +726,8 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimappin
         let primary_alignment = AlignmentInfo {
             ref_name: ref_name.to_string(),
             read_name: read_name.clone(),
-            read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-            start_pos: start as u32, // already 0-based
+            //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+            ref_start_pos: start as u32, // already 0-based
             is_reverse: rec.is_reverse_complemented(),
             cigar_str: rec.cigar.as_ref().unwrap().to_string(),
             mapping_quality: rec.mapq.unwrap_or(255),
@@ -726,8 +745,8 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, include_multimappin
                         let alt_alignment = AlignmentInfo {
                             ref_name: alt_hit.chr,
                             read_name: read_name.clone(),
-                            read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-                            start_pos: alt_hit.pos - 1,
+                            //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+                            ref_start_pos: alt_hit.pos - 1,
                             is_reverse: !alt_hit.strand,
                             cigar_str: alt_hit.cigar,
                             mapping_quality: 0,
@@ -765,6 +784,7 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
             continue;
         }
         
+        // let query_len: usize = fields[1].parse()?;
         // let query_start: usize = fields[2].parse()?;
         // let query_end: usize = fields[3].parse()?;
         // let _ref_len: usize = fields[6].parse()?;
@@ -773,8 +793,8 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
         let alignment = AlignmentInfo {
             ref_name: fields[5].to_string(),
             read_name: fields[0].to_string(),
-            read_len: fields[1].parse()?,
-            start_pos: fields[7].parse::<u32>()?, // already 0-based
+            //read_len: fields[1].parse()?,
+            ref_start_pos: fields[7].parse::<u32>()?, // already 0-based
             is_reverse: fields[4] == "-",
             cigar_str: cigar_str.to_string(),
             mapping_quality: fields[11].parse()?,
