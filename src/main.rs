@@ -707,17 +707,6 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
             continue; // Skip invalid lines
         }
 
-        let query_name = fields[0];
-        let query_len: usize = fields[1].parse()?;
-        let query_start: usize = fields[2].parse()?;
-        let query_end: usize = fields[3].parse()?;
-        let strand = fields[4];
-        let ref_name = fields[5];
-        let _ref_len: usize = fields[6].parse()?;
-        let ref_start: usize = fields[7].parse()?;
-        let _ref_end: usize = fields[8].parse()?;
-        let mapping_quality: u8 = fields[11].parse()?;
-
         // Find the cg:Z: tag for CIGAR string
         let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
             .map(|&f| &f[5..])
@@ -726,53 +715,27 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
             continue;
         }
         
-        let (alignment_span, matches) = calculate_alignment_stats(cigar_str);
+        // let query_name = fields[0];
+        // let query_len: usize = fields[1].parse()?;
+        // let query_start: usize = fields[2].parse()?;
+        // let query_end: usize = fields[3].parse()?;
+        // let strand = fields[4];
+        // let ref_name = fields[5];
+        // let _ref_len: usize = fields[6].parse()?;
+        // let ref_start: usize = fields[7].parse()?;
+        // let _ref_end: usize = fields[8].parse()?;
+        // let mapping_quality: u8 = fields[11].parse()?;
 
-        if let Some(path_id) = path_index.path_names.get(ref_name).copied() {
-            let pos_range = (ref_start as u32)..((ref_start + alignment_span - 1) as u32);
-        
-            if let Some(steps) = path_index.path_step_range_iter(ref_name, pos_range) {
-                let mut path_str = String::new();
-                let mut path_len: usize = 0;
-
-                let is_reverse_complemented = strand == "-";
-
-                let mut steps = steps.collect::<Vec<_>>();
-
-                if is_reverse_complemented {
-                    steps.reverse();
-                }
-
-                for (_step_ix, step) in steps {
-                    path_len += path_index.segment_lens[(step.node) as usize];
-                    let forward = step.reverse ^ is_reverse_complemented;
-                    use std::fmt::Write;
-                    write!(&mut path_str, "{}{}", if forward { ">" } else { "<" }, step.node + path_index.segment_id_range.0 as u32)?;
-                }
-
-                // Calculate step_offset
-                let start_pos = ref_start as u32;
-                let start_rank = path_index.path_step_offsets[path_id].rank(start_pos);
-                let mut step_offset = start_pos
-                    - path_index.path_step_offsets[path_id]
-                        .select((start_rank - 1) as u32)
-                        .unwrap();
-
-                if is_reverse_complemented {
-                    let last_bit = path_len as u32 - (step_offset as u32 + alignment_span as u32);
-                    step_offset = last_bit;
-                }
-
-                // Calculate path_start and path_end
-                let path_start = step_offset as usize;
-                let path_end = path_start + alignment_span;
-
-                // Output in the same format as the BAM processing
-                writeln!(stdout, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-                    query_name, query_len, query_start, query_end, "+",
-                    path_str, path_len, path_start, path_end, matches, alignment_span, mapping_quality, cigar_str)?;
-            }
-        }
+        let alignment = AlignmentInfo {
+            ref_name: fields[5].to_string(),
+            read_name: fields[0].to_string(),
+            read_len: fields[1].parse()?,
+            start_pos: fields[7].parse::<u32>()?, // already 0-based
+            is_reverse: fields[4] == "-",
+            cigar_str: cigar_str.to_string(),
+            mapping_quality: fields[11].parse()?,
+        };
+        process_alignment(alignment, &path_index, &mut stdout)?;
     }
 
     Ok(())
