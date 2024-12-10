@@ -441,7 +441,7 @@ dependencies = [
  "crossbeam",
  "flate2",
  "flume",
- "itertools",
+ "itertools 0.10.5",
  "libc",
  "lzzzz",
  "md5",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "gfainject"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "btoi",
@@ -477,6 +477,7 @@ dependencies = [
  "crossbeam-channel",
  "flate2",
  "gbam_tools",
+ "itertools 0.13.0",
  "memchr",
  "noodles",
  "roaring",
@@ -695,6 +696,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,9 +801,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.167"
+version = "0.2.168"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d6582e104315a817dff97f75133544b2e094ee22447d2acf4a74e189ba06fc"
+checksum = "5aaeb2981e0606ca11d79718f8bb01164f1d6ed75080182d3abf017e6d244b6d"
 
 [[package]]
 name = "libz-sys"

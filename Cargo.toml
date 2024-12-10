@@ -1,6 +1,6 @@
 [package]
 name = "gfainject"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -15,3 +15,4 @@ btoi = "0.4.3"
 roaring = "0.10.8"
 crossbeam-channel = "0.5.13"
 gbam_tools = { git = "https://github.com/NickRoz1/gbam", rev = "eaf0b59157cb9f52ebf28008b9a055247fe0c789" }
+itertools = "0.13.0"
