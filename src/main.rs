@@ -671,10 +671,12 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZ
             .filter(|hit| !hit.is_empty())
             .filter_map(AlternativeHit::from_xa_str)
             .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= primary_nm)
+            .take(max_alt.into())
             .collect();
 
         // Take up to max_alt hits with NM <= primary_nm
-        for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt.into()) {
+        for alt_hit in alt_hits_vec.into_iter() {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
@@ -810,10 +812,12 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
             .filter(|hit| !hit.is_empty())
             .filter_map(AlternativeHit::from_xa_str)
             .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= primary_nm)
+            .take(max_alt.into())
             .collect();
 
          // Take up to max_alt hits with NM <= primary_nm
-         for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt.into()) {
+         for alt_hit in alt_hits_vec.into_iter() {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
