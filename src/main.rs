@@ -341,14 +341,18 @@ impl AlternativeHit {
             return None;
         };
         let cigar = parts[2].to_string();
-        let _nm = parts[3].parse::<u32>().ok()?;
+        let nm = if parts.len() > 3 {
+            parts[3].parse::<u32>().ok()
+        } else {
+            None
+        };
 
         Some(AlternativeHit {
             chr,
             strand,
             pos,
             cigar,
-            // nm,
+            nm,
         })
     }
 }
@@ -640,28 +644,53 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             continue;
         };
 
-        let mut alt_count = 0;
+        // Get NM tag from primary alignment if alt_hits enabled
+        let primary_nm = {
+            use noodles::sam::record::data::field::Tag;
+            use std::str::FromStr;
+            
+            let nm_tag = Tag::from_str("NM").expect("Valid tag");
+            if let Some(field) = record.data().get(nm_tag) {
+                if let noodles::sam::record::data::field::Value::Int(nm) = field.value() {
+                    Some(*nm as u32)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
 
+        // Collect and filter alternative hits
+        let mut alt_hits_vec = Vec::new();
         for hit in xa_str.split(';') {
             if !hit.is_empty() {
                 if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
-                    let alt_alignment = AlignmentInfo {
-                        ref_name: alt_hit.chr,
-                        read_name: read_name.clone(),
-                        //read_len: record.sequence().len(),
-                        ref_start_pos: alt_hit.pos - 1,
-                        is_reverse: !alt_hit.strand,
-                        cigar_str: alt_hit.cigar,
-                        mapping_quality: 255,
-                    };
-                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
-
-                    alt_count += 1;
-                    if alt_count >= max_alt {
-                        break;
+                    // Skip if NM is higher than primary
+                    if let (Some(alt_nm), Some(prim_nm)) = (alt_hit.nm, primary_nm) {
+                        if alt_nm > prim_nm {
+                            continue;
+                        }
                     }
+                    alt_hits_vec.push(alt_hit);
                 }
             }
+        }
+
+        // Sort by NM value if present
+        alt_hits_vec.sort_by_key(|hit| hit.nm);
+
+        // Take up to max_alt hits
+        for alt_hit in alt_hits_vec.into_iter().take(max_alt) {
+            let alt_alignment = AlignmentInfo {
+                ref_name: alt_hit.chr,
+                read_name: read_name.clone(),
+                ref_start_pos: alt_hit.pos - 1,
+                is_reverse: !alt_hit.strand,
+                cigar_str: alt_hit.cigar,
+                mapping_quality: 255,
+            };
+            process_alignment(alt_alignment, &path_index, &mut stdout)?;
         }
     }
 
