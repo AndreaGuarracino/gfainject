@@ -12,6 +12,7 @@ use gbam_tools::Fields;
 
 use itertools::Itertools;
 
+use std::num::NonZeroUsize;
 use clap::{Parser, ArgGroup};
 
 #[derive(Parser, Debug)]
@@ -44,7 +45,7 @@ struct Args {
 
     /// Emit up to ALT_HITS alternative alignments (from XA tag, only for BAM/GBAM input)
     #[arg(long)]
-    alt_hits: Option<usize>,
+    alt_hits: Option<NonZeroUsize>,
 }
 
 /// Parse a range string in the format "path_name:start-end"
@@ -535,7 +536,7 @@ fn process_alignment(
     Ok(())
 }
 
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
+fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -622,10 +623,6 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             continue;
         };
 
-        if max_alt == 0 {
-            continue;
-        }
-
         let xa_str = {
             use noodles::sam::record::data::field::Tag;
             use std::str::FromStr;
@@ -674,10 +671,12 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             .filter(|hit| !hit.is_empty())
             .filter_map(AlternativeHit::from_xa_str)
             .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= primary_nm)
+            .take(max_alt.into())
             .collect();
 
         // Take up to max_alt hits with NM <= primary_nm
-        for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt) {
+        for alt_hit in alt_hits_vec.into_iter() {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
@@ -741,7 +740,7 @@ fn parse_nm_tag(tags: &[u8]) -> Option<u32> {
     None
 }
 
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
+fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -799,10 +798,6 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<us
             continue;
         };
 
-        if max_alt == 0 {
-            continue;
-        }
-
        // Get the XA string and primary NM value
         let (Some(xa_str), Some(primary_nm)) = (
             rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)),
@@ -817,10 +812,12 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<us
             .filter(|hit| !hit.is_empty())
             .filter_map(AlternativeHit::from_xa_str)
             .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= primary_nm)
+            .take(max_alt.into())
             .collect();
 
          // Take up to max_alt hits with NM <= primary_nm
-         for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt) {
+         for alt_hit in alt_hits_vec.into_iter() {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
