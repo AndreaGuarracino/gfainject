@@ -321,7 +321,7 @@ struct AlternativeHit {
     strand: bool,  // true for forward (+), false for reverse (-)
     pos: u32,
     cigar: String,
-    nm: Option<u32>,
+    nm: u32,
 }
 
 impl AlternativeHit {
@@ -341,11 +341,7 @@ impl AlternativeHit {
             return None;
         };
         let cigar = parts[2].to_string();
-        let nm = if parts.len() > 3 {
-            parts[3].parse::<u32>().ok()
-        } else {
-            None
-        };
+        let nm = parts[3].parse::<u32>().ok()?;
 
         Some(AlternativeHit {
             chr,
@@ -642,6 +638,22 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             }
         } else {
             continue;
+        };
+
+        let xa_str = {
+            use noodles::sam::record::data::field::Tag;
+            use std::str::FromStr;
+            
+            let xa_tag = Tag::from_str("XA").expect("Valid tag");
+            if let Some(field) = record.data().get(xa_tag) {
+                if let noodles::sam::record::data::field::Value::String(xa_str) = field.value() {
+                    Some(xa_str)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         // Get NM tag from primary alignment if alt_hits enabled
