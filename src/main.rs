@@ -10,6 +10,8 @@ use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::Fields;
 
+use itertools::Itertools;
+
 use clap::{Parser, ArgGroup};
 
 #[derive(Parser, Debug)]
@@ -624,22 +626,6 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             continue;
         }
 
-        use noodles::sam::record::data::field::Tag;
-        use std::str::FromStr;
-
-        let xa_tag = Tag::from_str("XA").expect("Valid tag");
-        let xa_str = if let Some(field) = record.data().get(xa_tag) {
-            match field.value() {
-                noodles::sam::record::data::field::Value::String(xa_string) => xa_string,
-                _ => {
-                    //println!("Unexpected value type for XA field.");
-                    continue;
-                }
-            }
-        } else {
-            continue;
-        };
-
         let xa_str = {
             use noodles::sam::record::data::field::Tag;
             use std::str::FromStr;
@@ -656,6 +642,10 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             }
         };
 
+        let Some(xa_str) = xa_str else {
+            continue;
+        };
+
         // Get NM tag from primary alignment if alt_hits enabled
         let primary_nm = {
             use noodles::sam::record::data::field::Tag;
@@ -663,37 +653,33 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             
             let nm_tag = Tag::from_str("NM").expect("Valid tag");
             if let Some(field) = record.data().get(nm_tag) {
-                if let noodles::sam::record::data::field::Value::Int(nm) = field.value() {
-                    Some(*nm as u32)
-                } else {
-                    None
+                match field.value() {
+                    noodles::sam::record::data::field::Value::UInt8(nm) => Some(*nm as u32),
+                    noodles::sam::record::data::field::Value::UInt16(nm) => Some(*nm as u32),
+                    noodles::sam::record::data::field::Value::UInt32(nm) => Some(*nm),
+                    _ => None
                 }
             } else {
                 None
             }
         };
 
-        // Collect and filter alternative hits
-        let mut alt_hits_vec = Vec::new();
-        for hit in xa_str.split(';') {
-            if !hit.is_empty() {
-                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
-                    // Skip if NM is higher than primary
-                    if let (Some(alt_nm), Some(prim_nm)) = (alt_hit.nm, primary_nm) {
-                        if alt_nm > prim_nm {
-                            continue;
-                        }
-                    }
-                    alt_hits_vec.push(alt_hit);
-                }
-            }
-        }
+        let Some(primary_nm) = primary_nm else {
+            continue;
+        };
 
-        // Sort by NM value if present
-        alt_hits_vec.sort_by_key(|hit| hit.nm);
+        // Collect all alternative hits and sort by NM value
+        let alt_hits_vec: Vec<_> = xa_str
+            .split(';')
+            .filter(|hit| !hit.is_empty())
+            .filter_map(AlternativeHit::from_xa_str)
+            .sorted_by_key(|hit| hit.nm)
+            .collect();
+
+        println!("alt_hits_vec: {}", alt_hits_vec.len());
 
         // Take up to max_alt hits
-        for alt_hit in alt_hits_vec.into_iter().take(max_alt) {
+        for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt) {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
