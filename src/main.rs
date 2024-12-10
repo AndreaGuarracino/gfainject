@@ -676,9 +676,7 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
             .sorted_by_key(|hit| hit.nm)
             .collect();
 
-        println!("alt_hits_vec: {}", alt_hits_vec.len());
-
-        // Take up to max_alt hits
+        // Take up to max_alt hits with NM <= primary_nm
         for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt) {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
@@ -697,6 +695,7 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<usiz
     Ok(())
 }
 
+// Add function to parse XA tag in GBAM
 fn parse_xa_tag(tags: &[u8]) -> Option<String> {
     let mut i = 0;
     while i < tags.len() - 2 {
@@ -721,6 +720,27 @@ fn parse_xa_tag(tags: &[u8]) -> Option<String> {
     None
 }
 
+// Add function to parse NM tag in GBAM
+fn parse_nm_tag(tags: &[u8]) -> Option<u32> {
+    let mut i = 0;
+    while i < tags.len() - 2 {
+        // Look for "NM"
+        if tags[i] == b'N' && tags[i + 1] == b'M' {
+            i += 2;
+            // Skip type identifier if present
+            if i < tags.len() && tags[i] == b'C' {
+                i += 1;
+            }
+            // Get the value
+            if i < tags.len() {
+                return Some(tags[i] as u32);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<usize>) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
@@ -732,7 +752,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<us
     template.set(&Fields::Mapq, true);
     template.set(&Fields::Pos, true);
     if alt_hits.is_some() {
-        template.set(&Fields::RawTags, true); // Need tags for XA field
+        template.set(&Fields::RawTags, true); // Need tags for XA and NM fields
     }
 
     let mut reader = Reader::new(file, template).unwrap();
@@ -783,34 +803,35 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<us
             continue;
         }
 
-        let Some(xa_str) = rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)) else {
-            continue
+       // Get the XA string and primary NM value
+        let (Some(xa_str), Some(primary_nm)) = (
+            rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)),
+            rec.tags.as_ref().and_then(|tags| parse_nm_tag(tags))
+        ) else {
+            continue;
         };
 
-        let mut alt_count = 0;
+        // Collect and sort alternative hits
+        let alt_hits_vec: Vec<_> = xa_str
+            .split(';')
+            .filter(|hit| !hit.is_empty())
+            .filter_map(AlternativeHit::from_xa_str)
+            .sorted_by_key(|hit| hit.nm)
+            .collect();
 
-        for hit in xa_str.split(';') {
-            if !hit.is_empty() {
-                if let Some(alt_hit) = AlternativeHit::from_xa_str(hit) {
-                    let alt_alignment = AlignmentInfo {
-                        ref_name: alt_hit.chr,
-                        read_name: read_name.clone(),
-                        //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-                        ref_start_pos: alt_hit.pos - 1,
-                        is_reverse: !alt_hit.strand,
-                        cigar_str: alt_hit.cigar,
-                        mapping_quality: 255,
-                    };
-                    process_alignment(alt_alignment, &path_index, &mut stdout)?;
-
-                    alt_count += 1;
-                    if alt_count >= max_alt {
-                        break;
-                    }
-                }
-            }
+         // Take up to max_alt hits with NM <= primary_nm
+         for alt_hit in alt_hits_vec.into_iter().take_while(|hit| hit.nm <= primary_nm).take(max_alt) {
+            let alt_alignment = AlignmentInfo {
+                ref_name: alt_hit.chr,
+                read_name: read_name.clone(),
+                //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
+                ref_start_pos: alt_hit.pos - 1,
+                is_reverse: !alt_hit.strand,
+                cigar_str: alt_hit.cigar,
+                mapping_quality: 255,
+            };
+            process_alignment(alt_alignment, &path_index, &mut stdout)?;
         }
-
     }
 
     std::io::stdout().flush()?;
