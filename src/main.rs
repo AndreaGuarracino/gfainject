@@ -321,7 +321,7 @@ struct AlternativeHit {
     strand: bool,  // true for forward (+), false for reverse (-)
     pos: u32,
     cigar: String,
-    // nm: u32,
+    nm: Option<u32>,
 }
 
 impl AlternativeHit {
