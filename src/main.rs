@@ -160,9 +160,7 @@ impl PathIndex {
     fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
         let gfa = std::fs::File::open(&gfa_path)?;
         let mut gfa_reader = BufReader::new(gfa);
-
         let mut line_buf = Vec::new();
-
         let mut seg_lens = Vec::new();
 
         let mut seg_id_range = (std::usize::MAX, 0usize);
@@ -170,22 +168,22 @@ impl PathIndex {
 
         loop {
             line_buf.clear();
-
-            let len = gfa_reader.read_until(0xA, &mut line_buf)?;
+            let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
             if len == 0 {
-                break;
+                break;  // End of file
             }
 
             let line = &line_buf[..len];
             let line_str = std::str::from_utf8(&line)?;
             // println!("{line_str}");
 
+            // Skip non-segment lines
             if !matches!(line.first(), Some(b'S')) {
                 continue;
             }
 
+            // Parse segment line format: S<tab>id<tab>sequence
             let mut fields = line_str.split(|c| c == '\t');
-
             let Some((name, seq)) = fields.next().and_then(|_type| {
                 let name = fields.next()?.trim();
                 let seq = fields.next()?.trim();
@@ -193,15 +191,14 @@ impl PathIndex {
             }) else {
                 continue;
             };
-            let seg_id = name.parse::<usize>()?;
 
             seg_id_range.0 = seg_id_range.0.min(seg_id);
             seg_id_range.1 = seg_id_range.1.max(seg_id);
-
             let len = seq.len();
             seg_lens.push(len);
         }
 
+        // Verify segments are tightly packed (no gaps in ID numbering)
         assert!(
         seg_id_range.1 - seg_id_range.0 == seg_lens.len() - 1,
         "GFA segments must be tightly packed: min ID {}, max ID {}, node count {}, was {}",
@@ -209,21 +206,20 @@ impl PathIndex {
         seg_id_range.1 - seg_id_range.0,
         );
 
+        // Second pass: Read paths to build path information
         let gfa = std::fs::File::open(&gfa_path)?;
         let mut gfa_reader = BufReader::new(gfa);
-
         let mut path_names = BTreeMap::default();
-
         let mut path_steps: Vec<Vec<PathStep>> = Vec::new();
         let mut path_step_offsets: Vec<RoaringBitmap> = Vec::new();
         // let mut path_pos: Vec<Vec<usize>> = Vec::new();
 
+        // Process each line looking for Path ('P') records
         loop {
             line_buf.clear();
-
             let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
             if len == 0 {
-                break;
+                break; // End of file
             }
 
             let line = &line_buf[..len];
@@ -231,6 +227,7 @@ impl PathIndex {
                 continue;
             }
 
+            // Parse path line format: P<tab>name<tab>segments
             let mut fields = line.split(|&c| c == b'\t');
 
             let Some((name, steps)) = fields.next().and_then(|_type| {
@@ -241,17 +238,16 @@ impl PathIndex {
                 continue;
             };
 
+            // Store path name and its index
             let name = std::str::from_utf8(name)?;
             path_names.insert(name.to_string(), path_steps.len());
 
-            let mut pos = 0;
-
+            let mut pos = 0; // Track position along the path
             let mut parsed_steps = Vec::new();
-
             let mut offsets = RoaringBitmap::new();
 
+            // Process comma-separated path steps
             let steps = steps.split(|&c| c == b',');
-
             for step in steps {
                 let (seg, orient) = step.split_at(step.len() - 1);
                 let seg_id = btoi::btou::<usize>(seg)?;
@@ -260,6 +256,7 @@ impl PathIndex {
 
                 let is_rev = orient == b"+";
 
+                // Create and store path step
                 let step = PathStep {
                     node: seg_ix as u32,
                     reverse: is_rev,
@@ -884,14 +881,12 @@ fn path_range_cmd(
     start: usize,
     end: usize,
 ) -> Result<()> {
-    let path = path_index
-        .path_names
-        .get(&path_name)
-        .expect("Path not found");
-
+    // Get path info from the indices
+    let path = path_index.path_names.get(&path_name).expect("Path not found");
     let offsets = path_index.path_step_offsets.get(*path).unwrap();
     let steps = path_index.path_steps.get(*path).unwrap();
 
+    // Calculate ranks and cardinality for the range
     let start_rank = offsets.rank(start as u32);
     let end_rank = offsets.rank(end as u32);
 
@@ -902,13 +897,12 @@ fn path_range_cmd(
     println!("cardinality: {cardinality}");
 
     println!("------");
+    // Calculate how many steps to skip and take
     let skip = (start_rank as usize).checked_sub(1).unwrap_or_default();
     let take = end_rank as usize - skip;
 
-
+    // Iterate through the steps directly
     println!("step_ix\tnode\tpos");
-    // let skip = 0;
-    // let take = 20;
     for (step_ix, (pos, step)) in
         offsets.iter().zip(steps).enumerate().skip(skip).take(take)
     {
