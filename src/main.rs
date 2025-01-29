@@ -158,11 +158,10 @@ impl PathIndex {
     }
 
     fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        // First pass: Read segments to get lengths and ID range
         let gfa = std::fs::File::open(&gfa_path)?;
         let mut gfa_reader = BufReader::new(gfa);
-
         let mut line_buf = Vec::new();
-
         let mut seg_lens = Vec::new();
 
         let mut seg_id_range = (std::usize::MAX, 0usize);
@@ -170,22 +169,22 @@ impl PathIndex {
 
         loop {
             line_buf.clear();
-
-            let len = gfa_reader.read_until(0xA, &mut line_buf)?;
+            let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
             if len == 0 {
-                break;
+                break;  // End of file
             }
 
             let line = &line_buf[..len];
             let line_str = std::str::from_utf8(&line)?;
             // println!("{line_str}");
 
+            // Skip non-segment lines
             if !matches!(line.first(), Some(b'S')) {
                 continue;
             }
 
+            // Parse segment line format: S<tab>id<tab>sequence
             let mut fields = line_str.split(|c| c == '\t');
-
             let Some((name, seq)) = fields.next().and_then(|_type| {
                 let name = fields.next()?.trim();
                 let seq = fields.next()?.trim();
@@ -193,37 +192,37 @@ impl PathIndex {
             }) else {
                 continue;
             };
+   
+            // Track segment ID range and store sequence length
             let seg_id = name.parse::<usize>()?;
-
             seg_id_range.0 = seg_id_range.0.min(seg_id);
             seg_id_range.1 = seg_id_range.1.max(seg_id);
-
             let len = seq.len();
             seg_lens.push(len);
         }
 
+        // Verify segments are tightly packed (no gaps in ID numbering)
         assert!(
-        seg_id_range.1 - seg_id_range.0 == seg_lens.len() - 1,
-        "GFA segments must be tightly packed: min ID {}, max ID {}, node count {}, was {}",
-        seg_id_range.0, seg_id_range.1, seg_lens.len(),
-        seg_id_range.1 - seg_id_range.0,
+            seg_id_range.1 - seg_id_range.0 == seg_lens.len() - 1,
+            "GFA segments must be tightly packed: min ID {}, max ID {}, node count {}, was {}",
+            seg_id_range.0, seg_id_range.1, seg_lens.len(),
+            seg_id_range.1 - seg_id_range.0,
         );
 
+        // Second pass: Read paths to build path information
         let gfa = std::fs::File::open(&gfa_path)?;
         let mut gfa_reader = BufReader::new(gfa);
-
         let mut path_names = BTreeMap::default();
-
         let mut path_steps: Vec<Vec<PathStep>> = Vec::new();
         let mut path_step_offsets: Vec<RoaringBitmap> = Vec::new();
         // let mut path_pos: Vec<Vec<usize>> = Vec::new();
 
+        // Process each line looking for Path ('P') records
         loop {
             line_buf.clear();
-
             let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
             if len == 0 {
-                break;
+                break; // End of file
             }
 
             let line = &line_buf[..len];
@@ -231,8 +230,8 @@ impl PathIndex {
                 continue;
             }
 
+            // Parse path line format: P<tab>name<tab>segments
             let mut fields = line.split(|&c| c == b'\t');
-
             let Some((name, steps)) = fields.next().and_then(|_type| {
                 let name = fields.next()?;
                 let steps = fields.next()?;
@@ -241,25 +240,25 @@ impl PathIndex {
                 continue;
             };
 
+            // Store path name and its index
             let name = std::str::from_utf8(name)?;
             path_names.insert(name.to_string(), path_steps.len());
 
-            let mut pos = 0;
-
+            let mut pos = 0; // Track position along the path
             let mut parsed_steps = Vec::new();
-
             let mut offsets = RoaringBitmap::new();
 
+            // Process comma-separated path steps
             let steps = steps.split(|&c| c == b',');
-
             for step in steps {
                 let (seg, orient) = step.split_at(step.len() - 1);
                 let seg_id = btoi::btou::<usize>(seg)?;
                 let seg_ix = seg_id - seg_id_range.0;
                 let len = seg_lens[seg_ix];
 
-                let is_rev = orient == b"+";
+                let is_rev = orient == b"-";
 
+                // Create and store path step
                 let step = PathStep {
                     node: seg_ix as u32,
                     reverse: is_rev,
@@ -471,8 +470,7 @@ fn process_alignment(
     };
 
     let (query_len, query_start, query_end, alignment_span, num_matches) = calculate_query_coords_and_align_stats(&alignment.cigar_str);
-    let alignment_end_pos = alignment.ref_start_pos + alignment_span as u32;
-
+    let alignment_end_pos = alignment.ref_start_pos + (alignment_span - 1) as u32;
     let pos_range = alignment.ref_start_pos..alignment_end_pos;
 
     if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
@@ -491,8 +489,8 @@ fn process_alignment(
             path_len += path_index.segment_lens[step.node as usize];
             // eprintln!("step_ix: {step_ix}");
 
-            // let reverse = step.reverse;
-            let forward = step.reverse ^ alignment.is_reverse;
+            // let forward = step.reverse ^ alignment.is_reverse;
+            let forward = step.reverse == alignment.is_reverse;
 
             write!(
                 &mut path_str,
@@ -502,13 +500,12 @@ fn process_alignment(
             )?;
         }
 
+        // Find starting position within first node
         let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
         //eprintln!("start_rank = {}", start_rank);
         let mut step_offset = alignment.ref_start_pos
-            - path_index.path_step_offsets[path_id]
-                .select((start_rank - 1) as u32)
-                .unwrap();
-
+                - path_index.path_step_offsets[path_id].select((start_rank - 1) as u32).unwrap();
+        // Adjust offset for reverse alignments
         if alignment.is_reverse {
             // start node offset changes
             //let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
@@ -878,37 +875,34 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+// Two different ways to query a range of steps in a path
 fn path_range_cmd(
     path_index: PathIndex,
     path_name: String,
     start: usize,
     end: usize,
 ) -> Result<()> {
-    let path = path_index
-        .path_names
-        .get(&path_name)
-        .expect("Path not found");
-
+    // Get path info from the indices
+    let path = path_index.path_names.get(&path_name).expect("Path not found");
     let offsets = path_index.path_step_offsets.get(*path).unwrap();
     let steps = path_index.path_steps.get(*path).unwrap();
 
+    // Calculate ranks and cardinality for the range
     let start_rank = offsets.rank(start as u32);
-    let end_rank = offsets.rank(end as u32);
-
-    let cardinality = offsets.range_cardinality((start as u32)..(end as u32));
+    let end_rank = offsets.rank((end - 1) as u32);
+    let cardinality = offsets.range_cardinality((start as u32)..((end - 1) as u32));
 
     println!("start_rank: {start_rank}");
     println!("end_rank: {end_rank}");
     println!("cardinality: {cardinality}");
 
     println!("------");
+    // Calculate how many steps to skip and take
     let skip = (start_rank as usize).checked_sub(1).unwrap_or_default();
     let take = end_rank as usize - skip;
 
-
+    // Iterate through the steps directly
     println!("step_ix\tnode\tpos");
-    // let skip = 0;
-    // let take = 20;
     for (step_ix, (pos, step)) in
         offsets.iter().zip(steps).enumerate().skip(skip).take(take)
     {
@@ -925,8 +919,7 @@ fn path_range_cmd(
     //         .select((start_rank - 1) as u32)
     //         .unwrap();
 
-    // let pos_range = (start.get() as u32)..(1 + end.get() as u32);
-    let pos_range = (start as u32)..(end as u32);
+    let pos_range = (start as u32)..((end - 1) as u32);
     if let Some(steps) = path_index.path_step_range_iter(&path_name, pos_range)
     {
         for (step_ix, step) in steps {
