@@ -256,7 +256,7 @@ impl PathIndex {
                 let seg_ix = seg_id - seg_id_range.0;
                 let len = seg_lens[seg_ix];
 
-                let is_rev = orient == b"+";
+                let is_rev = orient == b"-";
 
                 // Create and store path step
                 let step = PathStep {
