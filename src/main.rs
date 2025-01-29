@@ -192,7 +192,7 @@ impl PathIndex {
             }) else {
                 continue;
             };
-
+   
             // Track segment ID range and store sequence length
             let seg_id = name.parse::<usize>()?;
             seg_id_range.0 = seg_id_range.0.min(seg_id);
@@ -203,10 +203,10 @@ impl PathIndex {
 
         // Verify segments are tightly packed (no gaps in ID numbering)
         assert!(
-        seg_id_range.1 - seg_id_range.0 == seg_lens.len() - 1,
-        "GFA segments must be tightly packed: min ID {}, max ID {}, node count {}, was {}",
-        seg_id_range.0, seg_id_range.1, seg_lens.len(),
-        seg_id_range.1 - seg_id_range.0,
+            seg_id_range.1 - seg_id_range.0 == seg_lens.len() - 1,
+            "GFA segments must be tightly packed: min ID {}, max ID {}, node count {}, was {}",
+            seg_id_range.0, seg_id_range.1, seg_lens.len(),
+            seg_id_range.1 - seg_id_range.0,
         );
 
         // Second pass: Read paths to build path information
@@ -470,8 +470,7 @@ fn process_alignment(
     };
 
     let (query_len, query_start, query_end, alignment_span, num_matches) = calculate_query_coords_and_align_stats(&alignment.cigar_str);
-    let alignment_end_pos = alignment.ref_start_pos + alignment_span as u32;
-
+    let alignment_end_pos = alignment.ref_start_pos + (alignment_span - 1) as u32;
     let pos_range = alignment.ref_start_pos..alignment_end_pos;
 
     if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
@@ -505,9 +504,7 @@ fn process_alignment(
         let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
         //eprintln!("start_rank = {}", start_rank);
         let mut step_offset = alignment.ref_start_pos
-            - path_index.path_step_offsets[path_id]
-                .select((start_rank - 1) as u32)
-                .unwrap();
+                - path_index.path_step_offsets[path_id].select((start_rank - 1) as u32).unwrap();
         // Adjust offset for reverse alignments
         if alignment.is_reverse {
             // start node offset changes
@@ -892,9 +889,8 @@ fn path_range_cmd(
 
     // Calculate ranks and cardinality for the range
     let start_rank = offsets.rank(start as u32);
-    let end_rank = offsets.rank(end as u32);
-
-    let cardinality = offsets.range_cardinality((start as u32)..(end as u32));
+    let end_rank = offsets.rank((end - 1) as u32);
+    let cardinality = offsets.range_cardinality((start as u32)..((end - 1) as u32));
 
     println!("start_rank: {start_rank}");
     println!("end_rank: {end_rank}");
@@ -923,8 +919,7 @@ fn path_range_cmd(
     //         .select((start_rank - 1) as u32)
     //         .unwrap();
 
-    // let pos_range = (start.get() as u32)..(1 + end.get() as u32);
-    let pos_range = (start as u32)..(end as u32);
+    let pos_range = (start as u32)..((end - 1) as u32);
     if let Some(steps) = path_index.path_step_range_iter(&path_name, pos_range)
     {
         for (step_ix, step) in steps {
