@@ -490,8 +490,8 @@ fn process_alignment(
             path_len += path_index.segment_lens[step.node as usize];
             // eprintln!("step_ix: {step_ix}");
 
-            // let reverse = step.reverse;
-            let forward = step.reverse ^ alignment.is_reverse;
+            // let forward = step.reverse ^ alignment.is_reverse;
+            let forward = step.reverse == alignment.is_reverse;
 
             write!(
                 &mut path_str,
