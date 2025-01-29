@@ -158,6 +158,7 @@ impl PathIndex {
     }
 
     fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
+        // First pass: Read segments to get lengths and ID range
         let gfa = std::fs::File::open(&gfa_path)?;
         let mut gfa_reader = BufReader::new(gfa);
         let mut line_buf = Vec::new();
@@ -192,6 +193,8 @@ impl PathIndex {
                 continue;
             };
 
+            // Track segment ID range and store sequence length
+            let seg_id = name.parse::<usize>()?;
             seg_id_range.0 = seg_id_range.0.min(seg_id);
             seg_id_range.1 = seg_id_range.1.max(seg_id);
             let len = seq.len();
@@ -229,7 +232,6 @@ impl PathIndex {
 
             // Parse path line format: P<tab>name<tab>segments
             let mut fields = line.split(|&c| c == b'\t');
-
             let Some((name, steps)) = fields.next().and_then(|_type| {
                 let name = fields.next()?;
                 let steps = fields.next()?;
@@ -499,13 +501,14 @@ fn process_alignment(
             )?;
         }
 
+        // Find starting position within first node
         let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
         //eprintln!("start_rank = {}", start_rank);
         let mut step_offset = alignment.ref_start_pos
             - path_index.path_step_offsets[path_id]
                 .select((start_rank - 1) as u32)
                 .unwrap();
-
+        // Adjust offset for reverse alignments
         if alignment.is_reverse {
             // start node offset changes
             //let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
@@ -875,6 +878,7 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+// Two different ways to query a range of steps in a path
 fn path_range_cmd(
     path_index: PathIndex,
     path_name: String,
