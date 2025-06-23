@@ -168,7 +168,7 @@ impl PathIndex {
         let mut line_buf = Vec::new();
         let mut seg_lens = Vec::new();
 
-        let mut seg_id_range = (std::usize::MAX, 0usize);
+        let mut seg_id_range = (usize::MAX, 0usize);
         // dbg!();
 
         loop {
@@ -341,10 +341,10 @@ impl AlternativeHit {
 
         let chr = parts[0].to_string();
         let pos_str = parts[1];
-        let (strand, pos) = if pos_str.starts_with('-') {
-            (false, pos_str[1..].parse::<u32>().ok()?)
-        } else if pos_str.starts_with('+') {
-            (true, pos_str[1..].parse::<u32>().ok()?)
+        let (strand, pos) = if let Some(stripped) = pos_str.strip_prefix('-') {
+            (false, stripped.parse::<u32>().ok()?)
+        } else if let Some(stripped) = pos_str.strip_prefix('+') {
+            (true, stripped.parse::<u32>().ok()?)
         } else {
             return None;
         };
@@ -605,11 +605,11 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
         let mut xa_str = None;
         let mut primary_nm = None;
         
-        for i in 11..fields.len() {
-            if fields[i].starts_with("XA:Z:") {
-                xa_str = Some(&fields[i][5..]);
-            } else if fields[i].starts_with("NM:i:") {
-                primary_nm = fields[i][5..].parse::<u32>().ok();
+        for field in fields.iter().skip(11) {
+            if field.starts_with("XA:Z:") {
+                xa_str = Some(&field[5..]);
+            } else if field.starts_with("NM:i:") {
+                primary_nm = field[5..].parse::<u32>().ok();
             }
         }
         
