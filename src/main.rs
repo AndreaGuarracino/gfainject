@@ -2,7 +2,7 @@ use anyhow::Result;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
 use std::io::prelude::*;
-use std::{io::BufReader, path::PathBuf};
+use std::{io::BufReader, path::PathBuf, io::stdin};
 
 use std::fs::File;
 use gbam_tools::reader::parse_tmplt::ParsingTemplate;
@@ -20,12 +20,16 @@ use clap::{Parser, ArgGroup};
 #[command(group(
     ArgGroup::new("input_mode")
         .required(true)
-        .args(["bam", "paf", "gbam", "range"]),
+        .args(["sam", "bam", "paf", "gbam", "range"]),
 ))]
 struct Args {
     /// Path to input GFA file
     #[arg(long, required = true)]
     gfa: PathBuf,
+
+    /// Path to input SAM file
+    #[arg(short, long)]
+    sam: Option<PathBuf>,
 
     /// Path to input BAM file
     #[arg(short, long)]
@@ -164,7 +168,7 @@ impl PathIndex {
         let mut line_buf = Vec::new();
         let mut seg_lens = Vec::new();
 
-        let mut seg_id_range = (std::usize::MAX, 0usize);
+        let mut seg_id_range = (usize::MAX, 0usize);
         // dbg!();
 
         loop {
@@ -175,7 +179,7 @@ impl PathIndex {
             }
 
             let line = &line_buf[..len];
-            let line_str = std::str::from_utf8(&line)?;
+            let line_str = std::str::from_utf8(line)?;
             // println!("{line_str}");
 
             // Skip non-segment lines
@@ -184,7 +188,7 @@ impl PathIndex {
             }
 
             // Parse segment line format: S<tab>id<tab>sequence
-            let mut fields = line_str.split(|c| c == '\t');
+            let mut fields = line_str.split('\t');
             let Some((name, seq)) = fields.next().and_then(|_type| {
                 let name = fields.next()?.trim();
                 let seq = fields.next()?.trim();
@@ -288,7 +292,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
-    if let Some(bam_path) = args.bam {
+    if let Some(sam_path) = args.sam {
+        return sam_injection(path_index, sam_path, args.alt_hits);
+    }else if let Some(bam_path) = args.bam {
         return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path, args.alt_hits);
@@ -335,10 +341,10 @@ impl AlternativeHit {
 
         let chr = parts[0].to_string();
         let pos_str = parts[1];
-        let (strand, pos) = if pos_str.starts_with('-') {
-            (false, pos_str[1..].parse::<u32>().ok()?)
-        } else if pos_str.starts_with('+') {
-            (true, pos_str[1..].parse::<u32>().ok()?)
+        let (strand, pos) = if let Some(stripped) = pos_str.strip_prefix('-') {
+            (false, stripped.parse::<u32>().ok()?)
+        } else if let Some(stripped) = pos_str.strip_prefix('+') {
+            (true, stripped.parse::<u32>().ok()?)
         } else {
             return None;
         };
@@ -530,6 +536,110 @@ fn process_alignment(
         )?;
     }
 
+    Ok(())
+}
+
+fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    
+    // Support stdin when path is "-"
+    let reader: Box<dyn BufRead> = if sam_path.as_os_str() == "-" {
+        Box::new(BufReader::new(stdin()))
+    } else {
+        Box::new(BufReader::new(std::fs::File::open(sam_path)?))
+    };
+    let mut stdout = std::io::stdout().lock();
+    
+    for line in reader.lines() {
+        let line = line?;
+        
+        // Skip header lines
+        if line.starts_with('@') {
+            continue;
+        }
+        
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 11 {
+            continue;
+        }
+        
+        // Parse SAM fields
+        let qname = fields[0];
+        let flag = fields[1].parse::<u16>()?;
+        let rname = fields[2];
+        let pos = fields[3].parse::<u32>()? - 1; // Convert to 0-based
+        let mapq = fields[4].parse::<u8>()?;
+        let cigar_str = fields[5];
+        
+        // Skip unmapped reads
+        if flag & 0x4 != 0 || rname == "*" || cigar_str == "*" {
+            continue;
+        }
+        
+        // Skip secondary alignments
+        if flag & 0x100 != 0 {
+            continue;
+        }
+        
+        // Process read name with flags
+        let flags = SamFlagInfo::from_flag(flag);
+        let read_name = process_query_name(qname, flags);
+        
+        // Process primary alignment
+        let primary_alignment = AlignmentInfo {
+            ref_name: rname.to_string(),
+            read_name: read_name.clone(),
+            ref_start_pos: pos,
+            is_reverse: flag & 0x10 != 0,
+            cigar_str: cigar_str.to_string(),
+            mapping_quality: mapq,
+        };
+        process_alignment(primary_alignment, &path_index, &mut stdout)?;
+        
+        // Process alternative alignments if requested
+        let Some(max_alt) = alt_hits else {
+            continue;
+        };
+        
+        // Find XA and NM tags
+        let mut xa_str = None;
+        let mut primary_nm = None;
+        
+        for field in fields.iter().skip(11) {
+            if let Some(stripped) = field.strip_prefix("XA:Z:") {
+                xa_str = Some(stripped);
+            } else if let Some(stripped) = field.strip_prefix("NM:i:") {
+                primary_nm = stripped.parse::<u32>().ok();
+            }
+        }
+        
+        let (Some(xa), Some(nm)) = (xa_str, primary_nm) else {
+            continue;
+        };
+        
+        // Process alternative alignments
+        let alt_hits_vec: Vec<_> = xa
+            .split(';')
+            .filter(|hit| !hit.is_empty())
+            .filter_map(AlternativeHit::from_xa_str)
+            .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= nm)
+            .take(max_alt.into())
+            .collect();
+        
+        for alt_hit in alt_hits_vec {
+            let alt_alignment = AlignmentInfo {
+                ref_name: alt_hit.chr,
+                read_name: read_name.clone(),
+                ref_start_pos: alt_hit.pos - 1,
+                is_reverse: !alt_hit.strand,
+                cigar_str: alt_hit.cigar,
+                mapping_quality: 255,
+            };
+            process_alignment(alt_alignment, &path_index, &mut stdout)?;
+        }
+    }
+    
     Ok(())
 }
 
@@ -775,7 +885,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
         let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
         
         // Process read name with flags
-        let read_name = unsafe { std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap()) };
+        let read_name = unsafe { std::str::from_utf8_unchecked(rec.read_name.as_ref().unwrap()) };
         let flags = SamFlagInfo::from_flag(rec.flag.unwrap());
         let read_name = process_query_name(read_name.trim_end_matches('\0'), flags);
 
@@ -783,7 +893,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
             ref_name: ref_name.to_string(),
             read_name: read_name.clone(),
             //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-            ref_start_pos: start as u32, // already 0-based
+            ref_start_pos: start, // already 0-based
             is_reverse: rec.is_reverse_complemented(),
             cigar_str: rec.cigar.as_ref().unwrap().to_string(),
             mapping_quality: rec.mapq.unwrap_or(255),
