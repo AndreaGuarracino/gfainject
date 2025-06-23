@@ -179,7 +179,7 @@ impl PathIndex {
             }
 
             let line = &line_buf[..len];
-            let line_str = std::str::from_utf8(&line)?;
+            let line_str = std::str::from_utf8(line)?;
             // println!("{line_str}");
 
             // Skip non-segment lines
@@ -188,7 +188,7 @@ impl PathIndex {
             }
 
             // Parse segment line format: S<tab>id<tab>sequence
-            let mut fields = line_str.split(|c| c == '\t');
+            let mut fields = line_str.split('\t');
             let Some((name, seq)) = fields.next().and_then(|_type| {
                 let name = fields.next()?.trim();
                 let seq = fields.next()?.trim();
@@ -885,7 +885,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
         let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
         
         // Process read name with flags
-        let read_name = unsafe { std::str::from_utf8_unchecked(&rec.read_name.as_ref().unwrap()) };
+        let read_name = unsafe { std::str::from_utf8_unchecked(rec.read_name.as_ref().unwrap()) };
         let flags = SamFlagInfo::from_flag(rec.flag.unwrap());
         let read_name = process_query_name(read_name.trim_end_matches('\0'), flags);
 
@@ -893,7 +893,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
             ref_name: ref_name.to_string(),
             read_name: read_name.clone(),
             //read_len: rec.cigar.as_ref().unwrap().read_length() as usize,
-            ref_start_pos: start as u32, // already 0-based
+            ref_start_pos: start, // already 0-based
             is_reverse: rec.is_reverse_complemented(),
             cigar_str: rec.cigar.as_ref().unwrap().to_string(),
             mapping_quality: rec.mapq.unwrap_or(255),
