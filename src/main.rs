@@ -15,6 +15,8 @@ use itertools::Itertools;
 use clap::{ArgGroup, Parser};
 use std::num::NonZeroUsize;
 
+use flate2::read::GzDecoder;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(group(
@@ -168,28 +170,39 @@ impl PathIndex {
     }
 
     fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
-        // First pass: Read segments to get lengths and ID range
-        let gfa = std::fs::File::open(&gfa_path)?;
-        let mut gfa_reader = BufReader::new(gfa);
-        let mut line_buf = Vec::new();
-        let mut seg_lens = Vec::new();
+        let path = gfa_path.as_ref();
+        
+        // Helper function to create a reader that handles compression
+        fn create_reader(path: &std::path::Path) -> Result<Box<dyn BufRead>> {
+            let file = std::fs::File::open(path)?;
+            
+            if path.extension().map_or(false, |ext| ext == "gz" || ext == "bgz") {
+                let decoder = GzDecoder::new(file);
+                let buf_reader = BufReader::new(decoder);
+                Ok(Box::new(buf_reader))
+            } else {
+                let buf_reader = BufReader::new(file);
+                Ok(Box::new(buf_reader))
+            }
+        }
 
+        // First pass: Read segments to get lengths and ID range
+        let mut gfa_reader = create_reader(path)?;
+        let mut line = String::new();  // IMPORTANT: Use String, not Vec<u8>
+        let mut seg_lens = Vec::new();
         let mut seg_id_range = (usize::MAX, 0usize);
-        // dbg!();
 
         loop {
-            line_buf.clear();
-            let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
-            if len == 0 {
+            line.clear();
+            let bytes_read = gfa_reader.read_line(&mut line)?;  // Use read_line, not read_until
+            if bytes_read == 0 {
                 break; // End of file
             }
 
-            let line = &line_buf[..len];
-            let line_str = std::str::from_utf8(line)?;
+            let line_str = line.trim();
             // println!("{line_str}");
-
             // Skip non-segment lines
-            if !matches!(line.first(), Some(b'S')) {
+            if !line_str.starts_with('S') {
                 continue;
             }
 
@@ -220,8 +233,7 @@ impl PathIndex {
         );
 
         // Second pass: Read paths to build path information
-        let gfa = std::fs::File::open(&gfa_path)?;
-        let mut gfa_reader = BufReader::new(gfa);
+        let mut gfa_reader = create_reader(path)?;
         let mut path_names = BTreeMap::default();
         let mut path_steps: Vec<Vec<PathStep>> = Vec::new();
         let mut path_step_offsets: Vec<RoaringBitmap> = Vec::new();
@@ -229,19 +241,19 @@ impl PathIndex {
 
         // Process each line looking for Path ('P') records
         loop {
-            line_buf.clear();
-            let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
-            if len == 0 {
+            line.clear();
+            let bytes_read = gfa_reader.read_line(&mut line)?;
+            if bytes_read == 0 {
                 break; // End of file
             }
 
-            let line = &line_buf[..len];
-            if !matches!(line.first(), Some(b'P')) {
+            let line_str = line.trim();
+            if !line_str.starts_with('P') {
                 continue;
             }
 
             // Parse path line format: P<tab>name<tab>segments
-            let mut fields = line.split(|&c| c == b'\t');
+            let mut fields = line_str.split('\t');
             let Some((name, steps)) = fields.next().and_then(|_type| {
                 let name = fields.next()?;
                 let steps = fields.next()?;
@@ -251,7 +263,6 @@ impl PathIndex {
             };
 
             // Store path name and its index
-            let name = std::str::from_utf8(name)?;
             path_names.insert(name.to_string(), path_steps.len());
 
             let mut pos = 0; // Track position along the path
@@ -259,14 +270,17 @@ impl PathIndex {
             let mut offsets = RoaringBitmap::new();
 
             // Process comma-separated path steps
-            let steps = steps.split(|&c| c == b',');
-            for step in steps {
+            for step in steps.split(',') {
+                if step.is_empty() {
+                    continue;
+                }
+                
                 let (seg, orient) = step.split_at(step.len() - 1);
-                let seg_id = btoi::btou::<usize>(seg)?;
+                let seg_id = seg.parse::<usize>()?;  // Changed from btoi::btou
                 let seg_ix = seg_id - seg_id_range.0;
                 let len = seg_lens[seg_ix];
 
-                let is_rev = orient == b"-";
+                let is_rev = orient == "-";
 
                 // Create and store path step
                 let step = PathStep {
@@ -287,7 +301,6 @@ impl PathIndex {
             path_names,
             path_steps,
             path_step_offsets,
-
             segment_id_range: seg_id_range,
             segment_lens: seg_lens,
         })
