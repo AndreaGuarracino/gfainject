@@ -2,7 +2,7 @@ use anyhow::Result;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
 use std::io::prelude::*;
-use std::{io::BufReader, path::PathBuf};
+use std::{io::BufReader, path::PathBuf, io::stdin};
 
 use std::fs::File;
 use gbam_tools::reader::parse_tmplt::ParsingTemplate;
@@ -20,12 +20,16 @@ use clap::{Parser, ArgGroup};
 #[command(group(
     ArgGroup::new("input_mode")
         .required(true)
-        .args(["bam", "paf", "gbam", "range"]),
+        .args(["sam", "bam", "paf", "gbam", "range"]),
 ))]
 struct Args {
     /// Path to input GFA file
     #[arg(long, required = true)]
     gfa: PathBuf,
+
+    /// Path to input SAM file
+    #[arg(short, long)]
+    sam: Option<PathBuf>,
 
     /// Path to input BAM file
     #[arg(short, long)]
@@ -288,7 +292,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
-    if let Some(bam_path) = args.bam {
+    if let Some(sam_path) = args.sam {
+        return sam_injection(path_index, sam_path, args.alt_hits);
+    }else if let Some(bam_path) = args.bam {
         return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path, args.alt_hits);
@@ -530,6 +536,110 @@ fn process_alignment(
         )?;
     }
 
+    Ok(())
+}
+
+fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    
+    // Support stdin when path is "-"
+    let reader: Box<dyn BufRead> = if sam_path.as_os_str() == "-" {
+        Box::new(BufReader::new(stdin()))
+    } else {
+        Box::new(BufReader::new(std::fs::File::open(sam_path)?))
+    };
+    let mut stdout = std::io::stdout().lock();
+    
+    for line in reader.lines() {
+        let line = line?;
+        
+        // Skip header lines
+        if line.starts_with('@') {
+            continue;
+        }
+        
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 11 {
+            continue;
+        }
+        
+        // Parse SAM fields
+        let qname = fields[0];
+        let flag = fields[1].parse::<u16>()?;
+        let rname = fields[2];
+        let pos = fields[3].parse::<u32>()? - 1; // Convert to 0-based
+        let mapq = fields[4].parse::<u8>()?;
+        let cigar_str = fields[5];
+        
+        // Skip unmapped reads
+        if flag & 0x4 != 0 || rname == "*" || cigar_str == "*" {
+            continue;
+        }
+        
+        // Skip secondary alignments
+        if flag & 0x100 != 0 {
+            continue;
+        }
+        
+        // Process read name with flags
+        let flags = SamFlagInfo::from_flag(flag);
+        let read_name = process_query_name(qname, flags);
+        
+        // Process primary alignment
+        let primary_alignment = AlignmentInfo {
+            ref_name: rname.to_string(),
+            read_name: read_name.clone(),
+            ref_start_pos: pos,
+            is_reverse: flag & 0x10 != 0,
+            cigar_str: cigar_str.to_string(),
+            mapping_quality: mapq,
+        };
+        process_alignment(primary_alignment, &path_index, &mut stdout)?;
+        
+        // Process alternative alignments if requested
+        let Some(max_alt) = alt_hits else {
+            continue;
+        };
+        
+        // Find XA and NM tags
+        let mut xa_str = None;
+        let mut primary_nm = None;
+        
+        for i in 11..fields.len() {
+            if fields[i].starts_with("XA:Z:") {
+                xa_str = Some(&fields[i][5..]);
+            } else if fields[i].starts_with("NM:i:") {
+                primary_nm = fields[i][5..].parse::<u32>().ok();
+            }
+        }
+        
+        let (Some(xa), Some(nm)) = (xa_str, primary_nm) else {
+            continue;
+        };
+        
+        // Process alternative alignments
+        let alt_hits_vec: Vec<_> = xa
+            .split(';')
+            .filter(|hit| !hit.is_empty())
+            .filter_map(AlternativeHit::from_xa_str)
+            .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= nm)
+            .take(max_alt.into())
+            .collect();
+        
+        for alt_hit in alt_hits_vec {
+            let alt_alignment = AlignmentInfo {
+                ref_name: alt_hit.chr,
+                read_name: read_name.clone(),
+                ref_start_pos: alt_hit.pos - 1,
+                is_reverse: !alt_hit.strand,
+                cigar_str: alt_hit.cigar,
+                mapping_quality: 255,
+            };
+            process_alignment(alt_alignment, &path_index, &mut stdout)?;
+        }
+    }
+    
     Ok(())
 }
 

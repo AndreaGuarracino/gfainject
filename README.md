@@ -1,6 +1,6 @@
 # gfainject
 
-`gfainject` is a tool for mapping alignments from `BAM`, `PAF`, or `GBAM` format files to pangenome graphs in a `GFA` (Graphical Fragment Assembly) format graph. It outputs a `GAF` (Graph Alignment Format) file with one record per alignment, mapping each alignment to a sequence of steps in the graph.
+`gfainject` is a tool for mapping alignments from `SAM`, `BAM`, `PAF`, or `GBAM` format files to pangenome graphs in a `GFA` (Graphical Fragment Assembly) format graph. It outputs a `GAF` (Graph Alignment Format) file with one record per alignment, mapping each alignment to a sequence of steps in the graph.
 
 ## Installation
 
@@ -13,6 +13,12 @@ cargo build --release
 ## Usage
 
 ```shell
+# Convert SAM to GAF
+gfainject --gfa ref.gfa --sam aligned.sam > output.gaf
+
+# SAM input can be piped
+samtools view aligned.bam | gfainject --gfa graph.gfa --sam - --alt-hits 5 > output.gaf
+
 # Convert BAM to GAF
 gfainject --gfa ref.gfa --bam aligned.bam > output.gaf
 
@@ -38,7 +44,7 @@ gfainject --gfa ref.gfa --range "chr1:1000-2000"
 
 ## Features
 
-- Fast conversion from `BAM`/`PAF`/`GBAM` to `GAF` format
+- Fast conversion from `SAM`, `BAM`/`PAF`/`GBAM` to `GAF` format
 - Support for alternative alignments via `XA` tags
 - Handles paired-end reads with `/1` and `/2` suffixes
 - Path range queries for debugging
