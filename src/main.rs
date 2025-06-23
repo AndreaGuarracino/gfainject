@@ -171,12 +171,15 @@ impl PathIndex {
 
     fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = gfa_path.as_ref();
-        
+
         // Helper function to create a reader that handles compression
         fn create_reader(path: &std::path::Path) -> Result<Box<dyn BufRead>> {
             let file = std::fs::File::open(path)?;
-            
-            if path.extension().map_or(false, |ext| ext == "gz" || ext == "bgz") {
+
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "gz" || ext == "bgz")
+            {
                 let decoder = GzDecoder::new(file);
                 let buf_reader = BufReader::new(decoder);
                 Ok(Box::new(buf_reader))
@@ -188,13 +191,13 @@ impl PathIndex {
 
         // First pass: Read segments to get lengths and ID range
         let mut gfa_reader = create_reader(path)?;
-        let mut line = String::new();  // IMPORTANT: Use String, not Vec<u8>
+        let mut line = String::new(); // IMPORTANT: Use String, not Vec<u8>
         let mut seg_lens = Vec::new();
         let mut seg_id_range = (usize::MAX, 0usize);
 
         loop {
             line.clear();
-            let bytes_read = gfa_reader.read_line(&mut line)?;  // Use read_line, not read_until
+            let bytes_read = gfa_reader.read_line(&mut line)?; // Use read_line, not read_until
             if bytes_read == 0 {
                 break; // End of file
             }
@@ -274,9 +277,9 @@ impl PathIndex {
                 if step.is_empty() {
                     continue;
                 }
-                
+
                 let (seg, orient) = step.split_at(step.len() - 1);
-                let seg_id = seg.parse::<usize>()?;  // Changed from btoi::btou
+                let seg_id = seg.parse::<usize>()?; // Changed from btoi::btou
                 let seg_ix = seg_id - seg_id_range.0;
                 let len = seg_lens[seg_ix];
 
