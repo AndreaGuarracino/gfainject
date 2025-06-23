@@ -2,18 +2,18 @@ use anyhow::Result;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
 use std::io::prelude::*;
-use std::{io::BufReader, path::PathBuf, io::stdin};
+use std::{io::stdin, io::BufReader, path::PathBuf};
 
-use std::fs::File;
 use gbam_tools::reader::parse_tmplt::ParsingTemplate;
 use gbam_tools::reader::reader::Reader;
 use gbam_tools::reader::records::Records;
 use gbam_tools::Fields;
+use std::fs::File;
 
 use itertools::Itertools;
 
+use clap::{ArgGroup, Parser};
 use std::num::NonZeroUsize;
-use clap::{Parser, ArgGroup};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -56,8 +56,10 @@ struct Args {
 /// where path_name can contain ':' and '-' characters
 fn parse_range(s: &str) -> Result<(String, usize, usize), String> {
     // Find the last colon in the string
-    let last_colon_pos = s.rfind(':').ok_or("Range must include ':' separator".to_string())?;
-    
+    let last_colon_pos = s
+        .rfind(':')
+        .ok_or("Range must include ':' separator".to_string())?;
+
     // Split into path_name and range parts
     let path_name = s[..last_colon_pos].to_string();
     let range_str = &s[last_colon_pos + 1..];
@@ -69,13 +71,17 @@ fn parse_range(s: &str) -> Result<(String, usize, usize), String> {
     }
 
     // Parse start and end positions
-    let start = range_parts[0].parse::<usize>()
+    let start = range_parts[0]
+        .parse::<usize>()
         .map_err(|_| "Invalid start position".to_string())?;
-    let end = range_parts[1].parse::<usize>()
+    let end = range_parts[1]
+        .parse::<usize>()
         .map_err(|_| "Invalid end position".to_string())?;
 
     if end <= start {
-        return Err("End position must be greater than start position".to_string());
+        return Err(
+            "End position must be greater than start position".to_string()
+        );
     }
 
     Ok((path_name, start, end))
@@ -175,7 +181,7 @@ impl PathIndex {
             line_buf.clear();
             let len = gfa_reader.read_until(b'\n', &mut line_buf)?;
             if len == 0 {
-                break;  // End of file
+                break; // End of file
             }
 
             let line = &line_buf[..len];
@@ -196,7 +202,7 @@ impl PathIndex {
             }) else {
                 continue;
             };
-   
+
             // Track segment ID range and store sequence length
             let seg_id = name.parse::<usize>()?;
             seg_id_range.0 = seg_id_range.0.min(seg_id);
@@ -294,7 +300,7 @@ fn main() -> Result<()> {
 
     if let Some(sam_path) = args.sam {
         return sam_injection(path_index, sam_path, args.alt_hits);
-    }else if let Some(bam_path) = args.bam {
+    } else if let Some(bam_path) = args.bam {
         return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
         return paf_injection(path_index, paf_path, args.alt_hits);
@@ -326,7 +332,7 @@ impl SamFlagInfo {
 #[derive(Debug)]
 struct AlternativeHit {
     chr: String,
-    strand: bool,  // true for forward (+), false for reverse (-)
+    strand: bool, // true for forward (+), false for reverse (-)
     pos: u32,
     cigar: String,
     nm: u32,
@@ -366,7 +372,7 @@ fn process_query_name(query_name: &str, flags: SamFlagInfo) -> String {
     if !flags.is_paired {
         return query_name.to_string();
     }
-    
+
     // Add appropriate suffix based on first/second read
     if flags.is_first {
         format!("{}/1", query_name)
@@ -396,18 +402,29 @@ fn write_gaf_record<W: std::io::Write>(
     writeln!(
         writer,
         "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-        read_name, query_len, query_start, query_end,
-        path_str, path_len, path_start, path_end,
-        matches, alignment_span, mapping_quality, cigar
+        read_name,
+        query_len,
+        query_start,
+        query_end,
+        path_str,
+        path_len,
+        path_start,
+        path_end,
+        matches,
+        alignment_span,
+        mapping_quality,
+        cigar
     )?;
     Ok(())
 }
 
-fn calculate_query_coords_and_align_stats(cigar: &str) -> (usize, usize, usize, usize, usize) {
+fn calculate_query_coords_and_align_stats(
+    cigar: &str,
+) -> (usize, usize, usize, usize, usize) {
     let mut query_start = 0;
     let mut query_len = 0;
-    let mut query_consumed = 0;     // Track query bases consumed by M/=/X/I operations
-    let mut total_span = 0;         // Total span of alignment operations that consume the reference sequence (M/D/N/=/X operations)
+    let mut query_consumed = 0; // Track query bases consumed by M/=/X/I operations
+    let mut total_span = 0; // Total span of alignment operations that consume the reference sequence (M/D/N/=/X operations)
     let mut num_matches = 0;
     let mut num_buffer = String::with_capacity(4);
     let mut found_first_match = false;
@@ -418,7 +435,7 @@ fn calculate_query_coords_and_align_stats(cigar: &str) -> (usize, usize, usize, 
             num_buffer.push(ch);
         } else if !num_buffer.is_empty() {
             let count: usize = num_buffer.parse().unwrap();
-            
+
             // 'S', 'H', 'P', 'I' do not consume the reference sequence
             match ch {
                 'S' | 'H' => {
@@ -449,7 +466,13 @@ fn calculate_query_coords_and_align_stats(cigar: &str) -> (usize, usize, usize, 
         }
     }
 
-    (query_len, query_start, query_start + query_consumed, total_span, num_matches)
+    (
+        query_len,
+        query_start,
+        query_start + query_consumed,
+        total_span,
+        num_matches,
+    )
 }
 
 #[derive(Debug)]
@@ -470,16 +493,21 @@ fn process_alignment(
     if alignment.cigar_str.is_empty() || alignment.cigar_str == "*" {
         return Ok(());
     }
-   
-    let Some(path_id) = path_index.path_names.get(&alignment.ref_name).copied() else {
+
+    let Some(path_id) = path_index.path_names.get(&alignment.ref_name).copied()
+    else {
         return Ok(());
     };
 
-    let (query_len, query_start, query_end, alignment_span, num_matches) = calculate_query_coords_and_align_stats(&alignment.cigar_str);
-    let alignment_end_pos = alignment.ref_start_pos + (alignment_span - 1) as u32;
+    let (query_len, query_start, query_end, alignment_span, num_matches) =
+        calculate_query_coords_and_align_stats(&alignment.cigar_str);
+    let alignment_end_pos =
+        alignment.ref_start_pos + (alignment_span - 1) as u32;
     let pos_range = alignment.ref_start_pos..alignment_end_pos;
 
-    if let Some(steps) = path_index.path_step_range_iter(&alignment.ref_name, pos_range) {
+    if let Some(steps) =
+        path_index.path_step_range_iter(&alignment.ref_name, pos_range)
+    {
         use std::fmt::Write;
 
         let mut path_str = String::new();
@@ -507,15 +535,19 @@ fn process_alignment(
         }
 
         // Find starting position within first node
-        let start_rank = path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
+        let start_rank =
+            path_index.path_step_offsets[path_id].rank(alignment.ref_start_pos);
         //eprintln!("start_rank = {}", start_rank);
         let mut step_offset = alignment.ref_start_pos
-                - path_index.path_step_offsets[path_id].select((start_rank - 1) as u32).unwrap();
+            - path_index.path_step_offsets[path_id]
+                .select((start_rank - 1) as u32)
+                .unwrap();
         // Adjust offset for reverse alignments
         if alignment.is_reverse {
             // start node offset changes
             //let last_bit = path_len as u32 - (step_offset as u32 + record.cigar().alignment_span() as u32 - 1);
-            let last_bit = path_len as u32 - (step_offset + alignment_span as u32);
+            let last_bit =
+                path_len as u32 - (step_offset + alignment_span as u32);
             step_offset = last_bit;
         }
 
@@ -539,9 +571,13 @@ fn process_alignment(
     Ok(())
 }
 
-fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+fn sam_injection(
+    path_index: PathIndex,
+    sam_path: PathBuf,
+    alt_hits: Option<NonZeroUsize>,
+) -> Result<()> {
     use std::io::{BufRead, BufReader};
-    
+
     // Support stdin when path is "-"
     let reader: Box<dyn BufRead> = if sam_path.as_os_str() == "-" {
         Box::new(BufReader::new(stdin()))
@@ -549,20 +585,20 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
         Box::new(BufReader::new(std::fs::File::open(sam_path)?))
     };
     let mut stdout = std::io::stdout().lock();
-    
+
     for line in reader.lines() {
         let line = line?;
-        
+
         // Skip header lines
         if line.starts_with('@') {
             continue;
         }
-        
+
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 11 {
             continue;
         }
-        
+
         // Parse SAM fields
         let qname = fields[0];
         let flag = fields[1].parse::<u16>()?;
@@ -570,21 +606,21 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
         let pos = fields[3].parse::<u32>()? - 1; // Convert to 0-based
         let mapq = fields[4].parse::<u8>()?;
         let cigar_str = fields[5];
-        
+
         // Skip unmapped reads
         if flag & 0x4 != 0 || rname == "*" || cigar_str == "*" {
             continue;
         }
-        
+
         // Skip secondary alignments
         if flag & 0x100 != 0 {
             continue;
         }
-        
+
         // Process read name with flags
         let flags = SamFlagInfo::from_flag(flag);
         let read_name = process_query_name(qname, flags);
-        
+
         // Process primary alignment
         let primary_alignment = AlignmentInfo {
             ref_name: rname.to_string(),
@@ -595,16 +631,16 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
             mapping_quality: mapq,
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
-        
+
         // Process alternative alignments if requested
         let Some(max_alt) = alt_hits else {
             continue;
         };
-        
+
         // Find XA and NM tags
         let mut xa_str = None;
         let mut primary_nm = None;
-        
+
         for field in fields.iter().skip(11) {
             if let Some(stripped) = field.strip_prefix("XA:Z:") {
                 xa_str = Some(stripped);
@@ -612,11 +648,11 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
                 primary_nm = stripped.parse::<u32>().ok();
             }
         }
-        
+
         let (Some(xa), Some(nm)) = (xa_str, primary_nm) else {
             continue;
         };
-        
+
         // Process alternative alignments
         let alt_hits_vec: Vec<_> = xa
             .split(';')
@@ -626,7 +662,7 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
             .take_while(|hit| hit.nm <= nm)
             .take(max_alt.into())
             .collect();
-        
+
         for alt_hit in alt_hits_vec {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
@@ -639,11 +675,15 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
             process_alignment(alt_alignment, &path_index, &mut stdout)?;
         }
     }
-    
+
     Ok(())
 }
 
-fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+fn bam_injection(
+    path_index: PathIndex,
+    bam_path: PathBuf,
+    alt_hits: Option<NonZeroUsize>,
+) -> Result<()> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -686,7 +726,8 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZ
         let record = rec?;
 
         // skip the record if there is no alignment information
-        let (Some(start), Some(_end)) = (record.alignment_start(), record.alignment_end())
+        let (Some(start), Some(_end)) =
+            (record.alignment_start(), record.alignment_end())
         else {
             continue;
         };
@@ -721,7 +762,10 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZ
             ref_start_pos: (start.get() - 1) as u32,
             is_reverse: record.flags().is_reverse_complemented(),
             cigar_str: record.cigar().to_string(),
-            mapping_quality: record.mapping_quality().map(|q| q.get()).unwrap_or(255),
+            mapping_quality: record
+                .mapping_quality()
+                .map(|q| q.get())
+                .unwrap_or(255),
         };
         process_alignment(primary_alignment, &path_index, &mut stdout)?;
 
@@ -733,10 +777,13 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZ
         let xa_str = {
             use noodles::sam::record::data::field::Tag;
             use std::str::FromStr;
-            
+
             let xa_tag = Tag::from_str("XA").expect("Valid tag");
             if let Some(field) = record.data().get(xa_tag) {
-                if let noodles::sam::record::data::field::Value::String(xa_str) = field.value() {
+                if let noodles::sam::record::data::field::Value::String(
+                    xa_str,
+                ) = field.value()
+                {
                     Some(xa_str)
                 } else {
                     None
@@ -754,14 +801,20 @@ fn bam_injection(path_index: PathIndex, bam_path: PathBuf, alt_hits: Option<NonZ
         let primary_nm = {
             use noodles::sam::record::data::field::Tag;
             use std::str::FromStr;
-            
+
             let nm_tag = Tag::from_str("NM").expect("Valid tag");
             if let Some(field) = record.data().get(nm_tag) {
                 match field.value() {
-                    noodles::sam::record::data::field::Value::UInt8(nm) => Some(*nm as u32),
-                    noodles::sam::record::data::field::Value::UInt16(nm) => Some(*nm as u32),
-                    noodles::sam::record::data::field::Value::UInt32(nm) => Some(*nm),
-                    _ => None
+                    noodles::sam::record::data::field::Value::UInt8(nm) => {
+                        Some(*nm as u32)
+                    }
+                    noodles::sam::record::data::field::Value::UInt16(nm) => {
+                        Some(*nm as u32)
+                    }
+                    noodles::sam::record::data::field::Value::UInt32(nm) => {
+                        Some(*nm)
+                    }
+                    _ => None,
                 }
             } else {
                 None
@@ -810,13 +863,13 @@ fn parse_xa_tag(tags: &[u8]) -> Option<String> {
             // Skip tag name and type
             i += 3;
             let mut result = Vec::new();
-            
+
             // Read until null terminator or end of tags
             while i < tags.len() && tags[i] != 0 {
                 result.push(tags[i]);
                 i += 1;
             }
-            
+
             if !result.is_empty() {
                 return String::from_utf8(result).ok();
             }
@@ -847,7 +900,11 @@ fn parse_nm_tag(tags: &[u8]) -> Option<u32> {
     None
 }
 
-fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+fn gbam_injection(
+    path_index: PathIndex,
+    gbam_path: PathBuf,
+    alt_hits: Option<NonZeroUsize>,
+) -> Result<()> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -875,19 +932,23 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
         if rec.is_unmapped() || rec.refid.unwrap() < 0 {
             continue; // Unmapped read
         }
-        
+
         // skip the record if there is no alignment information
-        let (Some(start), Some(_end)) = (rec.alignment_start(), rec.alignment_end())
+        let (Some(start), Some(_end)) =
+            (rec.alignment_start(), rec.alignment_end())
         else {
             continue;
         };
 
         let ref_name = &ref_seqs[rec.refid.unwrap() as usize].0;
-        
+
         // Process read name with flags
-        let read_name = unsafe { std::str::from_utf8_unchecked(rec.read_name.as_ref().unwrap()) };
+        let read_name = unsafe {
+            std::str::from_utf8_unchecked(rec.read_name.as_ref().unwrap())
+        };
         let flags = SamFlagInfo::from_flag(rec.flag.unwrap());
-        let read_name = process_query_name(read_name.trim_end_matches('\0'), flags);
+        let read_name =
+            process_query_name(read_name.trim_end_matches('\0'), flags);
 
         let primary_alignment = AlignmentInfo {
             ref_name: ref_name.to_string(),
@@ -905,10 +966,10 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
             continue;
         };
 
-       // Get the XA string and primary NM value
+        // Get the XA string and primary NM value
         let (Some(xa_str), Some(primary_nm)) = (
             rec.tags.as_ref().and_then(|tags| parse_xa_tag(tags)),
-            rec.tags.as_ref().and_then(|tags| parse_nm_tag(tags))
+            rec.tags.as_ref().and_then(|tags| parse_nm_tag(tags)),
         ) else {
             continue;
         };
@@ -923,8 +984,8 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
             .take(max_alt.into())
             .collect();
 
-         // Take up to max_alt hits with NM <= primary_nm
-         for alt_hit in alt_hits_vec.into_iter() {
+        // Take up to max_alt hits with NM <= primary_nm
+        for alt_hit in alt_hits_vec.into_iter() {
             let alt_alignment = AlignmentInfo {
                 ref_name: alt_hit.chr,
                 read_name: read_name.clone(),
@@ -943,7 +1004,11 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
     Ok(())
 }
 
-fn paf_injection(path_index: PathIndex, paf_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
+fn paf_injection(
+    path_index: PathIndex,
+    paf_path: PathBuf,
+    alt_hits: Option<NonZeroUsize>,
+) -> Result<()> {
     let file = std::fs::File::open(paf_path)?;
     let reader = BufReader::new(file);
     let mut stdout = std::io::stdout().lock();
@@ -957,13 +1022,15 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf, alt_hits: Option<NonZ
         }
 
         // Find the cg:Z: tag for CIGAR string
-        let cigar_str = fields.iter().find(|&&f| f.starts_with("cg:Z:"))
+        let cigar_str = fields
+            .iter()
+            .find(|&&f| f.starts_with("cg:Z:"))
             .map(|&f| &f[5..])
             .unwrap_or("");
         if cigar_str.is_empty() || cigar_str == "*" {
             continue;
         }
-        
+
         // let query_len: usize = fields[1].parse()?;
         // let query_start: usize = fields[2].parse()?;
         // let query_end: usize = fields[3].parse()?;
@@ -987,14 +1054,18 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf, alt_hits: Option<NonZ
         };
 
         // Find XA:Z: tag for alternative alignments
-        let xa_str = fields.iter().find(|&&f| f.starts_with("XA:Z:"))
+        let xa_str = fields
+            .iter()
+            .find(|&&f| f.starts_with("XA:Z:"))
             .map(|&f| &f[5..]);
         let Some(xa_str) = xa_str else {
             continue;
         };
 
         // Find NM:i: tag for primary alignment
-        let primary_nm = fields.iter().find(|&&f| f.starts_with("NM:i:"))
+        let primary_nm = fields
+            .iter()
+            .find(|&&f| f.starts_with("NM:i:"))
             .and_then(|&f| f[5..].parse::<u32>().ok());
         let Some(primary_nm) = primary_nm else {
             continue;
@@ -1035,14 +1106,18 @@ fn path_range_cmd(
     end: usize,
 ) -> Result<()> {
     // Get path info from the indices
-    let path = path_index.path_names.get(&path_name).expect("Path not found");
+    let path = path_index
+        .path_names
+        .get(&path_name)
+        .expect("Path not found");
     let offsets = path_index.path_step_offsets.get(*path).unwrap();
     let steps = path_index.path_steps.get(*path).unwrap();
 
     // Calculate ranks and cardinality for the range
     let start_rank = offsets.rank(start as u32);
     let end_rank = offsets.rank((end - 1) as u32);
-    let cardinality = offsets.range_cardinality((start as u32)..((end - 1) as u32));
+    let cardinality =
+        offsets.range_cardinality((start as u32)..((end - 1) as u32));
 
     println!("start_rank: {start_rank}");
     println!("end_rank: {end_rank}");
