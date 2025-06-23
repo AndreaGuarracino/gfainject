@@ -16,6 +16,9 @@ cargo build --release
 # Convert SAM to GAF
 gfainject --gfa ref.gfa --sam aligned.sam > output.gaf
 
+# GFA files can be gzip/bgzip compressed
+gfainject --gfa ref.gfa.gz --sam aligned.sam > output.gaf
+
 # SAM input can be piped
 samtools view aligned.bam | gfainject --gfa graph.gfa --sam - --alt-hits 5 > output.gaf
 
@@ -45,6 +48,7 @@ gfainject --gfa ref.gfa --range "chr1:1000-2000"
 ## Features
 
 - Fast conversion from `SAM`, `BAM`/`PAF`/`GBAM` to `GAF` format
+- Support for compressed `GFA` files (gzip/bgzip)
 - Support for alternative alignments via `XA` tags
 - Handles paired-end reads with `/1` and `/2` suffixes
 - Path range queries for debugging
