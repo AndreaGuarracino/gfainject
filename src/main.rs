@@ -606,10 +606,10 @@ fn sam_injection(path_index: PathIndex, sam_path: PathBuf, alt_hits: Option<NonZ
         let mut primary_nm = None;
         
         for field in fields.iter().skip(11) {
-            if field.starts_with("XA:Z:") {
-                xa_str = Some(&field[5..]);
-            } else if field.starts_with("NM:i:") {
-                primary_nm = field[5..].parse::<u32>().ok();
+            if let Some(stripped) = field.strip_prefix("XA:Z:") {
+                xa_str = Some(stripped);
+            } else if let Some(stripped) = field.strip_prefix("NM:i:") {
+                primary_nm = stripped.parse::<u32>().ok();
             }
         }
         
