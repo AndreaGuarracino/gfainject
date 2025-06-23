@@ -43,7 +43,7 @@ struct Args {
     #[arg(short, long, value_parser = parse_range)]
     range: Option<(String, usize, usize)>,
 
-    /// Emit up to ALT_HITS alternative alignments (from XA tag, only for BAM/GBAM input)
+    /// Emit up to ALT_HITS alternative alignments (from XA tag)
     #[arg(long)]
     alt_hits: Option<NonZeroUsize>,
 }
@@ -291,7 +291,7 @@ fn main() -> Result<()> {
     if let Some(bam_path) = args.bam {
         return bam_injection(path_index, bam_path, args.alt_hits);
     } else if let Some(paf_path) = args.paf {
-        return paf_injection(path_index, paf_path);
+        return paf_injection(path_index, paf_path, args.alt_hits);
     } else if let Some(gbam_path) = args.gbam {
         return gbam_injection(path_index, gbam_path, args.alt_hits);
     } else if let Some((path, start, end)) = args.range {
@@ -833,7 +833,7 @@ fn gbam_injection(path_index: PathIndex, gbam_path: PathBuf, alt_hits: Option<No
     Ok(())
 }
 
-fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
+fn paf_injection(path_index: PathIndex, paf_path: PathBuf, alt_hits: Option<NonZeroUsize>) -> Result<()> {
     let file = std::fs::File::open(paf_path)?;
     let reader = BufReader::new(file);
     let mut stdout = std::io::stdout().lock();
@@ -870,6 +870,48 @@ fn paf_injection(path_index: PathIndex, paf_path: PathBuf) -> Result<()> {
             mapping_quality: fields[11].parse()?,
         };
         process_alignment(alignment, &path_index, &mut stdout)?;
+
+        // Process alternative alignments only if requested
+        let Some(max_alt) = alt_hits else {
+            continue;
+        };
+
+        // Find XA:Z: tag for alternative alignments
+        let xa_str = fields.iter().find(|&&f| f.starts_with("XA:Z:"))
+            .map(|&f| &f[5..]);
+        let Some(xa_str) = xa_str else {
+            continue;
+        };
+
+        // Find NM:i: tag for primary alignment
+        let primary_nm = fields.iter().find(|&&f| f.starts_with("NM:i:"))
+            .and_then(|&f| f[5..].parse::<u32>().ok());
+        let Some(primary_nm) = primary_nm else {
+            continue;
+        };
+
+        // Collect and sort alternative hits by NM value
+        let alt_hits_vec: Vec<_> = xa_str
+            .split(';')
+            .filter(|hit| !hit.is_empty())
+            .filter_map(AlternativeHit::from_xa_str)
+            .sorted_by_key(|hit| hit.nm)
+            .take_while(|hit| hit.nm <= primary_nm)
+            .take(max_alt.into())
+            .collect();
+
+        // Process alternative alignments
+        for alt_hit in alt_hits_vec.into_iter() {
+            let alt_alignment = AlignmentInfo {
+                ref_name: alt_hit.chr,
+                read_name: fields[0].to_string(), // Use original read name
+                ref_start_pos: alt_hit.pos - 1,
+                is_reverse: !alt_hit.strand,
+                cigar_str: alt_hit.cigar,
+                mapping_quality: 255, // Default MQ for alternative alignments
+            };
+            process_alignment(alt_alignment, &path_index, &mut stdout)?;
+        }
     }
 
     Ok(())
