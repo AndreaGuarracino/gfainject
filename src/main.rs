@@ -264,7 +264,7 @@ impl PathIndex {
                     reverse: is_rev,
                 };
                 parsed_steps.push(step);
-                offsets.push(pos as u32);
+                let _ = offsets.try_push(pos as u32);
 
                 pos += len;
             }
