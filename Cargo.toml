@@ -6,13 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.98"
-clap = { version = "4.5.40", features = ["derive"] }
-memchr = "2.7.5"
-noodles = { version = "0.31.0", features = ["sam", "bam", "cram", "fasta", "core"] }
-flate2 = "1.1.2"
-btoi = "0.4.3"
-roaring = "0.11.0"
-crossbeam-channel = "0.5.15"
+clap = { version = "4.5.51", features = ["derive"] }
+noodles = { version = "0.31.0", features = ["sam", "bam", "core"] }
+flate2 = "1.1.5"
+roaring = "0.11.2"
 gbam_tools = { git = "https://github.com/NickRoz1/gbam", rev = "eaf0b59157cb9f52ebf28008b9a055247fe0c789" }
-itertools = "0.13.0"
+itertools = "0.14.0"
+console = { version = "0.16", features = ["std"] }

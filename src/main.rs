@@ -1,4 +1,3 @@
-use anyhow::Result;
 use roaring::RoaringBitmap;
 use std::collections::BTreeMap;
 use std::io::prelude::*;
@@ -169,11 +168,11 @@ impl PathIndex {
         })
     }
 
-    fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self> {
+    fn from_gfa(gfa_path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error>> {
         let path = gfa_path.as_ref();
 
         // Helper function to create a reader that handles compression
-        fn create_reader(path: &std::path::Path) -> Result<Box<dyn BufRead>> {
+        fn create_reader(path: &std::path::Path) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
             let file = std::fs::File::open(path)?;
 
             if path
@@ -310,7 +309,7 @@ impl PathIndex {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let path_index = PathIndex::from_gfa(&args.gfa)?;
 
@@ -414,7 +413,7 @@ fn write_gaf_record<W: std::io::Write>(
     alignment_span: usize,
     mapping_quality: u8,
     cigar: &str,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         writer,
         "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
@@ -505,7 +504,7 @@ fn process_alignment(
     alignment: AlignmentInfo,
     path_index: &PathIndex,
     stdout: &mut impl std::io::Write,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     if alignment.cigar_str.is_empty() || alignment.cigar_str == "*" {
         return Ok(());
     }
@@ -591,7 +590,7 @@ fn sam_injection(
     path_index: PathIndex,
     sam_path: PathBuf,
     alt_hits: Option<NonZeroUsize>,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{BufRead, BufReader};
 
     // Support stdin when path is "-"
@@ -699,7 +698,7 @@ fn bam_injection(
     path_index: PathIndex,
     bam_path: PathBuf,
     alt_hits: Option<NonZeroUsize>,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     use noodles::bam;
 
     let mut bam = std::fs::File::open(&bam_path).map(bam::Reader::new)?;
@@ -920,7 +919,7 @@ fn gbam_injection(
     path_index: PathIndex,
     gbam_path: PathBuf,
     alt_hits: Option<NonZeroUsize>,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(gbam_path.clone()).unwrap();
     let mut template = ParsingTemplate::new();
     // Only fetch fields which are needed.
@@ -1024,7 +1023,7 @@ fn paf_injection(
     path_index: PathIndex,
     paf_path: PathBuf,
     alt_hits: Option<NonZeroUsize>,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(paf_path)?;
     let reader = BufReader::new(file);
     let mut stdout = std::io::stdout().lock();
@@ -1120,7 +1119,7 @@ fn path_range_cmd(
     path_name: String,
     start: usize,
     end: usize,
-) -> Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     // Get path info from the indices
     let path = path_index
         .path_names
